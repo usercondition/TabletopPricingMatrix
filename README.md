@@ -4,12 +4,20 @@ Quote generator for resin print jobs that **undercuts Amazon** while maximizing 
 
 ## How it prices
 
-1. **Slicer grams** × **live bottle cost** (Amazon resin ASIN) → material cost  
-2. Add labor, machine, failure buffer, pack, ship → **cost floor**  
+1. **Slicer grams** × **live bottle cost** (Amazon resin ASIN) → material  
+2. Add labor, machine, failure buffer, pack, ship → **cost floor** (supports **quantity**)  
 3. Fetch the **Amazon listing** for the finished item you compete with  
-4. Recommend the **highest price that still undercuts** Amazon (default 5%), unless that drops below your min-margin floor — then it warns and quotes the floor instead  
+4. Recommend the **highest price that still undercuts** Amazon (default 5%), unless that drops below your min-margin floor  
 
-Outputs map to Print Operations / HubSpot fields (`amount`, `print_*_cost`).
+Generate never blocks on Amazon — type listing `$` manually anytime.
+
+## Reliability
+
+- 8s Amazon server timeout + cache + fallback  
+- 12s client abort  
+- In-flight Amazon request dedupe  
+- Stable form (no full-page wipe on status)  
+- sessionStorage for inputs  
 
 ## Run locally
 

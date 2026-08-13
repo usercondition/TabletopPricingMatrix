@@ -29,13 +29,31 @@ test("undercut maximizes profit under Amazon when above floor", () => {
     undercutPercent: 0.05,
     undercutExtraUsd: 0,
     minMargin: 0.25,
+    quantity: 1,
   };
   const result = generatePricing(input);
   assert.equal(result.competitive.strategy, "undercut_max_profit");
-  assert.equal(result.competitive.recommendedUsd, 114); // 120 * 0.95
+  assert.equal(result.competitive.recommendedUsd, 114);
   assert.equal(result.competitive.viable, true);
-  assert.ok(result.competitive.recommendedUsd < 120);
-  assert.ok(result.competitive.recommendedUsd >= result.competitive.minViableUsd);
+  assert.ok((result.insights.maxViableUndercutPercent ?? 0) > 5);
+});
+
+test("quantity scales Amazon and costs", () => {
+  const one = generatePricing({
+    ...DEFAULT_INPUTS,
+    competitorPriceUsd: 100,
+    undercutPercent: 0.1,
+    quantity: 1,
+  });
+  const two = generatePricing({
+    ...DEFAULT_INPUTS,
+    competitorPriceUsd: 100,
+    undercutPercent: 0.1,
+    quantity: 2,
+  });
+  assert.equal(two.costs.quantity, 2);
+  assert.equal(two.competitive.recommendedUsd, round2(one.competitive.recommendedUsd * 2));
+  assert.equal(two.competitive.amazonListingUsd, 200);
 });
 
 test("blocks undercut when Amazon is below cost floor", () => {
@@ -60,10 +78,11 @@ test("without competitor uses target margin", () => {
   const result = generatePricing({ ...DEFAULT_INPUTS, competitorPriceUsd: 0 });
   assert.equal(result.competitive.strategy, "no_competitor_target_margin");
   assert.equal(result.recommended.marginPercent, 40);
+  assert.equal(result.insights.amazonBeatsFloor, null);
 });
 
 test("hubspot fields sum to cost total", () => {
-  const result = generatePricing({ ...DEFAULT_INPUTS, competitorPriceUsd: 150 });
+  const result = generatePricing({ ...DEFAULT_INPUTS, competitorPriceUsd: 150, quantity: 3 });
   assert.equal(
     round2(
       result.hubspotFields.print_material_cost +
@@ -77,4 +96,15 @@ test("hubspot fields sum to cost total", () => {
 
 test("parseAmazonProductPrice reads priceToPay", () => {
   assert.equal(parseAmazonProductPrice(`{"priceToPay":{"amount":27.99}}`), 27.99);
+});
+
+test("insights expose profit per print hour", () => {
+  const result = generatePricing({
+    ...DEFAULT_INPUTS,
+    competitorPriceUsd: 200,
+    printHours: 5,
+    quantity: 2,
+  });
+  assert.ok(result.insights.profitPerPrintHour !== null);
+  assert.ok(result.insights.profitPerPrintHour > 0);
 });

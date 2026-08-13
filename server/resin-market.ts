@@ -3,7 +3,7 @@ import { round2 } from "../shared/pricing-model.js";
 export const DEFAULT_RESIN_NAME = "ELEGOO ABS-Like 3.0 Space Grey";
 export const DEFAULT_RESIN_ASIN = "B0D6Y6JV42";
 export const DEFAULT_BOTTLE_MASS_G = 1000;
-export const AMAZON_FETCH_TIMEOUT_MS = 10_000;
+export const AMAZON_FETCH_TIMEOUT_MS = 8_000;
 export const AMAZON_PRICE_CACHE_MS = 6 * 60 * 60 * 1000;
 
 export interface AmazonListingPrice {
@@ -15,10 +15,13 @@ export interface AmazonListingPrice {
   cached: boolean;
   url: string;
   warning?: string;
+  elapsedMs?: number;
 }
 
 type CacheEntry = { price: number; title: string | null; fetchedAtMs: number };
 const cache = new Map<string, CacheEntry>();
+/** Deduplicate concurrent Amazon fetches for the same ASIN. */
+const inflight = new Map<string, Promise<AmazonListingPrice>>();
 
 export function parseAsin(input: string): string | null {
   const raw = input.trim();
@@ -64,6 +67,98 @@ export function parseAmazonProductTitle(html: string): string | null {
   return null;
 }
 
+export function getCachedListing(asin: string): CacheEntry | null {
+  const hit = cache.get(asin);
+  if (!hit) return null;
+  if (Date.now() - hit.fetchedAtMs >= AMAZON_PRICE_CACHE_MS) return null;
+  return hit;
+}
+
+async function fetchAmazonListingUncached(options: {
+  asin: string;
+  url: string;
+  fetchImpl: typeof fetch;
+  fallbackPrice?: number;
+  label?: string;
+}): Promise<AmazonListingPrice> {
+  const { asin, url, fetchImpl } = options;
+  const started = Date.now();
+  const hit = cache.get(asin);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AMAZON_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (compatible; TabletopPricingMatrix/1.0; +https://github.com/usercondition/TabletopPricingMatrix)",
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "en-US,en;q=0.9",
+      },
+    });
+    if (!response.ok) throw new Error(`Amazon returned HTTP ${response.status}`);
+    const html = await response.text();
+    if (/enter the characters you see|robot check|api-services-support@amazon\.com/i.test(html)) {
+      throw new Error("Amazon blocked the live price request");
+    }
+    const price = parseAmazonProductPrice(html);
+    if (price === null) throw new Error("Could not parse Amazon buy-box price");
+    const title = parseAmazonProductTitle(html);
+    const now = Date.now();
+    cache.set(asin, { price, title, fetchedAtMs: now });
+    return {
+      asin,
+      title,
+      priceUsd: price,
+      source: "amazon",
+      fetchedAt: new Date(now).toISOString(),
+      cached: false,
+      url,
+      elapsedMs: now - started,
+    };
+  } catch (error) {
+    const elapsedMs = Date.now() - started;
+    const message =
+      error instanceof Error
+        ? error.name === "AbortError"
+          ? `Amazon timed out after ${AMAZON_FETCH_TIMEOUT_MS}ms`
+          : error.message
+        : "Amazon fetch failed";
+    if (hit) {
+      return {
+        asin,
+        title: hit.title,
+        priceUsd: hit.price,
+        source: "amazon",
+        fetchedAt: new Date(hit.fetchedAtMs).toISOString(),
+        cached: true,
+        url,
+        elapsedMs,
+        warning: `${message}. Using cached $${hit.price.toFixed(2)}.`,
+      };
+    }
+    const fallback = options.fallbackPrice;
+    return {
+      asin,
+      title: options.label ?? null,
+      priceUsd: fallback ?? null,
+      source: fallback !== undefined ? "fallback" : "unavailable",
+      fetchedAt: null,
+      cached: false,
+      url,
+      elapsedMs,
+      warning:
+        fallback !== undefined
+          ? `${message}. Using fallback $${fallback.toFixed(2)}.`
+          : `${message}. Enter the Amazon price manually.`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchAmazonListing(options: {
   asinOrUrl: string;
   fetchImpl?: typeof fetch;
@@ -98,72 +193,25 @@ export async function fetchAmazonListing(options: {
       fetchedAt: new Date(hit.fetchedAtMs).toISOString(),
       cached: true,
       url,
+      elapsedMs: 0,
     };
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AMAZON_FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetchImpl(url, {
-      method: "GET",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (compatible; TabletopPricingMatrix/1.0; +https://github.com/usercondition/TabletopPricingMatrix)",
-        accept: "text/html,application/xhtml+xml",
-        "accept-language": "en-US,en;q=0.9",
-      },
-    });
-    if (!response.ok) throw new Error(`Amazon returned HTTP ${response.status}`);
-    const html = await response.text();
-    if (/enter the characters you see|robot check|api-services-support@amazon\.com/i.test(html)) {
-      throw new Error("Amazon blocked the live price request");
-    }
-    const price = parseAmazonProductPrice(html);
-    if (price === null) throw new Error("Could not parse Amazon buy-box price");
-    const title = parseAmazonProductTitle(html);
-    cache.set(asin, { price, title, fetchedAtMs: now });
-    return {
-      asin,
-      title,
-      priceUsd: price,
-      source: "amazon",
-      fetchedAt: new Date(now).toISOString(),
-      cached: false,
-      url,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Amazon fetch failed";
-    if (hit) {
-      return {
-        asin,
-        title: hit.title,
-        priceUsd: hit.price,
-        source: "amazon",
-        fetchedAt: new Date(hit.fetchedAtMs).toISOString(),
-        cached: true,
-        url,
-        warning: `${message}. Using cached $${hit.price.toFixed(2)}.`,
-      };
-    }
-    const fallback = options.fallbackPrice;
-    return {
-      asin,
-      title: options.label ?? null,
-      priceUsd: fallback ?? null,
-      source: fallback !== undefined ? "fallback" : "unavailable",
-      fetchedAt: null,
-      cached: false,
-      url,
-      warning:
-        fallback !== undefined
-          ? `${message}. Using fallback $${fallback.toFixed(2)}.`
-          : `${message}. Enter the Amazon price manually.`,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+  const key = `${asin}:${options.force ? "force" : "normal"}`;
+  const existing = inflight.get(key);
+  if (existing) return existing;
+
+  const promise = fetchAmazonListingUncached({
+    asin,
+    url,
+    fetchImpl,
+    fallbackPrice: options.fallbackPrice,
+    label: options.label,
+  }).finally(() => {
+    inflight.delete(key);
+  });
+  inflight.set(key, promise);
+  return promise;
 }
 
 export async function fetchAmazonResinPrice(options?: {
@@ -180,6 +228,7 @@ export async function fetchAmazonResinPrice(options?: {
   cached: boolean;
   url: string;
   warning?: string;
+  elapsedMs?: number;
 }> {
   const listing = await fetchAmazonListing({
     asinOrUrl: options?.asin ?? DEFAULT_RESIN_ASIN,
@@ -198,5 +247,6 @@ export async function fetchAmazonResinPrice(options?: {
     cached: listing.cached,
     url: listing.url,
     warning: listing.warning,
+    elapsedMs: listing.elapsedMs,
   };
 }

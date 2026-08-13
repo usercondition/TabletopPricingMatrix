@@ -10,24 +10,30 @@
  */
 
 export interface PricingInputs {
-  /** Resin used in grams (from slicer / CTB). */
+  /** Resin used in grams (from slicer / CTB) per unit. */
   resinMassG: number;
   resinVolumeMl: number;
+  /** How many units this quote covers. */
+  quantity: number;
   /** Bottle economics (live Amazon resin or manual). */
   bottlePriceUsd: number;
   bottleMassG: number;
   bottleVolumeMl: number | null;
-  /** Amazon listing price for the product you are making / competing with. */
+  /** Amazon listing price for the product you are making / competing with (per unit). */
   competitorPriceUsd: number;
   /** Undercut Amazon by this fraction (0.05 = 5% cheaper). */
   undercutPercent: number;
   /** Optional flat extra undercut in dollars (added on top of %). */
   undercutExtraUsd: number;
+  /** Pure hands-on minutes per unit. */
   laborMinutes: number;
   laborRatePerHour: number;
+  /** Machine print hours per unit. */
   printHours: number;
   machineRatePerHour: number;
+  /** Packaging per unit. */
   packagingUsd: number;
+  /** Shipping for the order (not multiplied by qty by default). */
   shippingUsd: number;
   failureRate: number;
   /** Never recommend below this margin even to undercut. */
@@ -44,8 +50,10 @@ export interface CostBreakdown {
   packagingUsd: number;
   shippingUsd: number;
   costTotalUsd: number;
+  costPerUnitUsd: number;
   usdPerGram: number | null;
   usdPerMl: number | null;
+  quantity: number;
 }
 
 export type QuoteStrategy =
@@ -60,6 +68,7 @@ export interface CompetitiveQuote {
   costFloorUsd: number;
   minViableUsd: number;
   recommendedUsd: number;
+  recommendedPerUnitUsd: number;
   savingsVsAmazonUsd: number | null;
   savingsVsAmazonPercent: number | null;
   grossProfitUsd: number;
@@ -77,9 +86,18 @@ export interface QuoteTier {
   rationale: string;
 }
 
+export interface PricingInsights {
+  profitPerPrintHour: number | null;
+  resinSharePercent: number;
+  maxViableUndercutPercent: number | null;
+  headroomVsAmazonUsd: number | null;
+  amazonBeatsFloor: boolean | null;
+}
+
 export interface PricingResult {
   costs: CostBreakdown;
   competitive: CompetitiveQuote;
+  insights: PricingInsights;
   tiers: QuoteTier[];
   recommended: QuoteTier;
   hubspotFields: {
@@ -111,7 +129,13 @@ export function marginForAmount(amount: number, costTotal: number): number {
   return round2(((amount - costTotal) / amount) * 100);
 }
 
+export function normalizeQuantity(quantity: number): number {
+  if (!Number.isFinite(quantity) || quantity < 1) return 1;
+  return Math.min(10_000, Math.floor(quantity));
+}
+
 export function computeCosts(input: PricingInputs): CostBreakdown {
+  const qty = normalizeQuantity(input.quantity);
   const bottleMass = input.bottleMassG > 0 ? input.bottleMassG : 1000;
   const usdPerGram =
     input.bottlePriceUsd > 0 && bottleMass > 0 ? input.bottlePriceUsd / bottleMass : null;
@@ -123,17 +147,22 @@ export function computeCosts(input: PricingInputs): CostBreakdown {
   const usdPerMl =
     input.bottlePriceUsd > 0 && volume > 0 ? input.bottlePriceUsd / volume : null;
 
-  let materialUsd = 0;
+  let materialPerUnit = 0;
   if (input.resinMassG > 0 && usdPerGram !== null) {
-    materialUsd = input.resinMassG * usdPerGram;
+    materialPerUnit = input.resinMassG * usdPerGram;
   } else if (input.resinVolumeMl > 0 && usdPerMl !== null) {
-    materialUsd = input.resinVolumeMl * usdPerMl;
+    materialPerUnit = input.resinVolumeMl * usdPerMl;
   }
 
-  const laborUsd = (Math.max(0, input.laborMinutes) / 60) * Math.max(0, input.laborRatePerHour);
-  const machineUsd = Math.max(0, input.printHours) * Math.max(0, input.machineRatePerHour);
+  const laborPerUnit = (Math.max(0, input.laborMinutes) / 60) * Math.max(0, input.laborRatePerHour);
+  const machinePerUnit = Math.max(0, input.printHours) * Math.max(0, input.machineRatePerHour);
+  const packagingPerUnit = Math.max(0, input.packagingUsd);
+
+  const materialUsd = materialPerUnit * qty;
+  const laborUsd = laborPerUnit * qty;
+  const machineUsd = machinePerUnit * qty;
+  const packagingUsd = packagingPerUnit * qty;
   const failureBufferUsd = (materialUsd + machineUsd) * clamp(input.failureRate, 0, 1);
-  const packagingUsd = Math.max(0, input.packagingUsd);
   const shippingUsd = Math.max(0, input.shippingUsd);
   const costTotalUsd =
     materialUsd + laborUsd + machineUsd + failureBufferUsd + packagingUsd + shippingUsd;
@@ -146,23 +175,27 @@ export function computeCosts(input: PricingInputs): CostBreakdown {
     packagingUsd: round2(packagingUsd),
     shippingUsd: round2(shippingUsd),
     costTotalUsd: round2(costTotalUsd),
+    costPerUnitUsd: round2(costTotalUsd / qty),
     usdPerGram: usdPerGram === null ? null : round2(usdPerGram * 1000) / 1000,
     usdPerMl: usdPerMl === null ? null : round2(usdPerMl * 1000) / 1000,
+    quantity: qty,
   };
 }
 
 /**
  * Highest price that still undercuts Amazon, without going below min-margin floor.
- * That maximizes profit among undercutting prices.
+ * Amazon / undercut prices are treated as per-unit and scaled by quantity.
  */
 export function computeCompetitiveQuote(
   input: PricingInputs,
   costs: CostBreakdown,
 ): CompetitiveQuote {
+  const qty = costs.quantity;
   const minViableUsd = amountForMargin(costs.costTotalUsd, input.minMargin);
-  const amazon = input.competitorPriceUsd > 0 ? round2(input.competitorPriceUsd) : null;
+  const amazonUnit = input.competitorPriceUsd > 0 ? round2(input.competitorPriceUsd) : null;
+  const amazon = amazonUnit === null ? null : round2(amazonUnit * qty);
 
-  if (amazon === null) {
+  if (amazon === null || amazonUnit === null) {
     const recommendedUsd = amountForMargin(costs.costTotalUsd, input.targetMargin);
     return {
       strategy: "no_competitor_target_margin",
@@ -171,20 +204,21 @@ export function computeCompetitiveQuote(
       costFloorUsd: costs.costTotalUsd,
       minViableUsd,
       recommendedUsd,
+      recommendedPerUnitUsd: round2(recommendedUsd / qty),
       savingsVsAmazonUsd: null,
       savingsVsAmazonPercent: null,
       grossProfitUsd: round2(recommendedUsd - costs.costTotalUsd),
       marginPercent: marginForAmount(recommendedUsd, costs.costTotalUsd),
       viable: recommendedUsd >= minViableUsd,
       message:
-        "No Amazon product price yet — using target margin. Paste a competitor ASIN to undercut.",
+        "No Amazon product price yet — using target margin. Paste a competitor ASIN or type the listing price.",
     };
   }
 
   const undercutPct = clamp(input.undercutPercent, 0, 0.5);
   const undercutExtra = Math.max(0, input.undercutExtraUsd);
-  // Max profit while undercutting = price just under Amazon by the chosen undercut.
-  const undercutPriceUsd = round2(amazon * (1 - undercutPct) - undercutExtra);
+  const undercutUnit = round2(amazonUnit * (1 - undercutPct) - undercutExtra);
+  const undercutPriceUsd = round2(undercutUnit * qty);
 
   if (undercutPriceUsd < minViableUsd) {
     return {
@@ -194,12 +228,13 @@ export function computeCompetitiveQuote(
       costFloorUsd: costs.costTotalUsd,
       minViableUsd,
       recommendedUsd: minViableUsd,
+      recommendedPerUnitUsd: round2(minViableUsd / qty),
       savingsVsAmazonUsd: round2(amazon - minViableUsd),
       savingsVsAmazonPercent: round2(((amazon - minViableUsd) / amazon) * 100),
       grossProfitUsd: round2(minViableUsd - costs.costTotalUsd),
       marginPercent: marginForAmount(minViableUsd, costs.costTotalUsd),
       viable: false,
-      message: `Undercut ($${undercutPriceUsd.toFixed(2)}) is below your min-margin floor ($${minViableUsd.toFixed(2)}). Do not match Amazon that low — quote the floor or skip the job.`,
+      message: `Undercut ($${undercutPriceUsd.toFixed(2)} for ${qty}) is below your min-margin floor ($${minViableUsd.toFixed(2)}). Quote the floor or skip — do not chase Amazon below cost.`,
     };
   }
 
@@ -210,12 +245,46 @@ export function computeCompetitiveQuote(
     costFloorUsd: costs.costTotalUsd,
     minViableUsd,
     recommendedUsd: undercutPriceUsd,
+    recommendedPerUnitUsd: undercutUnit,
     savingsVsAmazonUsd: round2(amazon - undercutPriceUsd),
     savingsVsAmazonPercent: round2(((amazon - undercutPriceUsd) / amazon) * 100),
     grossProfitUsd: round2(undercutPriceUsd - costs.costTotalUsd),
     marginPercent: marginForAmount(undercutPriceUsd, costs.costTotalUsd),
     viable: true,
-    message: `Best profit while undercutting Amazon by ${round2(undercutPct * 100)}%${undercutExtra > 0 ? ` + $${undercutExtra.toFixed(2)}` : ""}.`,
+    message: `Best profit while undercutting Amazon by ${round2(undercutPct * 100)}%${undercutExtra > 0 ? ` + $${undercutExtra.toFixed(2)}/unit` : ""} · ${qty} unit${qty === 1 ? "" : "s"}.`,
+  };
+}
+
+export function computeInsights(
+  input: PricingInputs,
+  costs: CostBreakdown,
+  competitive: CompetitiveQuote,
+): PricingInsights {
+  const totalPrintHours = Math.max(0, input.printHours) * costs.quantity;
+  const profitPerPrintHour =
+    totalPrintHours > 0 ? round2(competitive.grossProfitUsd / totalPrintHours) : null;
+  const resinSharePercent =
+    costs.costTotalUsd > 0 ? round2((costs.materialUsd / costs.costTotalUsd) * 100) : 0;
+
+  let maxViableUndercutPercent: number | null = null;
+  let amazonBeatsFloor: boolean | null = null;
+  let headroomVsAmazonUsd: number | null = null;
+
+  if (competitive.amazonListingUsd !== null && competitive.amazonListingUsd > 0) {
+    amazonBeatsFloor = competitive.amazonListingUsd >= competitive.minViableUsd;
+    headroomVsAmazonUsd = round2(competitive.amazonListingUsd - competitive.recommendedUsd);
+    // Largest % undercut that still clears minViable: price = amazon*(1-p) >= minViable
+    // => p <= 1 - minViable/amazon
+    const raw = 1 - competitive.minViableUsd / competitive.amazonListingUsd;
+    maxViableUndercutPercent = round2(clamp(raw, 0, 0.9) * 100);
+  }
+
+  return {
+    profitPerPrintHour,
+    resinSharePercent,
+    maxViableUndercutPercent,
+    headroomVsAmazonUsd,
+    amazonBeatsFloor,
   };
 }
 
@@ -239,6 +308,8 @@ function tier(
 export function generatePricing(input: PricingInputs): PricingResult {
   const costs = computeCosts(input);
   const competitive = computeCompetitiveQuote(input, costs);
+  const insights = computeInsights(input, costs, competitive);
+  const qty = costs.quantity;
 
   const tiers: QuoteTier[] = [
     tier(
@@ -269,7 +340,7 @@ export function generatePricing(input: PricingInputs): PricingResult {
         "Amazon list",
         competitive.amazonListingUsd,
         costs.costTotalUsd,
-        "Competitor Amazon buy-box / list price (do not exceed if you want to undercut).",
+        "Competitor Amazon buy-box / list price (scaled by quantity).",
       ),
     );
   } else {
@@ -279,7 +350,7 @@ export function generatePricing(input: PricingInputs): PricingResult {
         "Target margin",
         amountForMargin(costs.costTotalUsd, input.targetMargin),
         costs.costTotalUsd,
-        "Fallback when no Amazon product ASIN is set.",
+        "Fallback when no Amazon product price is set.",
       ),
     );
   }
@@ -293,7 +364,6 @@ export function generatePricing(input: PricingInputs): PricingResult {
           : t.id === "target" || t.id === "floor",
     ) ?? tiers[0];
 
-  // Prefer explicit competitive recommendation amount on the chosen tier.
   const recommendedTier: QuoteTier = {
     ...recommended,
     amountUsd: competitive.recommendedUsd,
@@ -306,6 +376,7 @@ export function generatePricing(input: PricingInputs): PricingResult {
   return {
     costs,
     competitive,
+    insights,
     tiers,
     recommended: recommendedTier,
     hubspotFields: {
@@ -321,6 +392,7 @@ export function generatePricing(input: PricingInputs): PricingResult {
 export const DEFAULT_INPUTS: PricingInputs = {
   resinMassG: 85,
   resinVolumeMl: 0,
+  quantity: 1,
   bottlePriceUsd: 28,
   bottleMassG: 1000,
   bottleVolumeMl: null,

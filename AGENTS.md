@@ -4,13 +4,22 @@
 
 ### Product
 
-**Tabletop Pricing Matrix** — competitive resin-print quote tool.
+**Tabletop Pricing Matrix** — competitive resin-print quote tool for Print Operations.
 
-Core flow:
+Flow:
 1. Slicer resin grams × live Amazon bottle cost → material
-2. Full cost stack → min-margin floor
-3. Amazon listing for the finished product → undercut while maximizing profit
-4. Map to HubSpot Print Operations fields
+2. Cost stack → min-margin floor
+3. Amazon listing for the finished item → undercut while maximizing profit
+4. Map to HubSpot fields
+
+### Reliability / hang prevention
+
+- Generate **never waits on Amazon**. Live fetches are background-only; manual `$` fields always work.
+- Client API calls abort at **12s**; Amazon server fetch aborts at **8s** and falls back to cache/manual.
+- Concurrent Amazon requests for the same ASIN are **deduped**.
+- UI does **not** full-re-render on status changes (avoids wiped inputs / frozen “Working…”).
+- Form state persists in `sessionStorage` (`tpm-pricing-v2`).
+- Stale `/api/price` responses are ignored via a sequence counter.
 
 ### Services
 
@@ -19,8 +28,6 @@ Core flow:
 | App | `npm run build && npm run start` (or `npm run dev`) | `PORT` or `4177` |
 | Tests | `npm test` | |
 | Lint | `npm run lint` | |
-
-Amazon HTML price parse is best-effort (cache + manual fallback).
 
 ### Print Operations
 

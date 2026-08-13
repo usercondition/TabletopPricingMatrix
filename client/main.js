@@ -1,56 +1,90 @@
+const STORAGE_KEY = "tpm-pricing-v2";
+const API_TIMEOUT_MS = 12_000;
+
 const money = (n) =>
   Number(n ?? 0).toLocaleString("en-US", {
     style: "currency",
     currency: "USD",
   });
 
+const defaultInputs = () => ({
+  resinMassG: 85,
+  resinVolumeMl: 0,
+  quantity: 1,
+  bottlePriceUsd: 28,
+  bottleMassG: 1000,
+  bottleVolumeMl: null,
+  competitorPriceUsd: 0,
+  undercutPercent: 0.05,
+  undercutExtraUsd: 0,
+  laborMinutes: 45,
+  laborRatePerHour: 35,
+  printHours: 6,
+  machineRatePerHour: 2.5,
+  packagingUsd: 4,
+  shippingUsd: 8,
+  failureRate: 0.08,
+  minMargin: 0.25,
+  targetMargin: 0.4,
+});
+
 const state = {
-  inputs: {
-    resinMassG: 85,
-    resinVolumeMl: 0,
-    bottlePriceUsd: 28,
-    bottleMassG: 1000,
-    bottleVolumeMl: null,
-    competitorPriceUsd: 0,
-    undercutPercent: 0.05,
-    undercutExtraUsd: 0,
-    laborMinutes: 45,
-    laborRatePerHour: 35,
-    printHours: 6,
-    machineRatePerHour: 2.5,
-    packagingUsd: 4,
-    shippingUsd: 8,
-    failureRate: 0.08,
-    minMargin: 0.25,
-    targetMargin: 0.4,
-  },
+  inputs: defaultInputs(),
   competitorAsin: "",
   competitor: null,
   market: null,
   result: null,
-  status: "", // short non-blocking status line
+  status: "",
   error: null,
   copied: false,
+  priceSeq: 0,
 };
 
 const fields = [
   ["resinMassG", "Slicer resin (g)"],
-  ["printHours", "Print hours"],
-  ["laborMinutes", "Labor minutes"],
+  ["quantity", "Quantity (units)"],
+  ["printHours", "Print hours / unit"],
+  ["laborMinutes", "Labor min / unit"],
   ["laborRatePerHour", "Labor $/hr"],
   ["machineRatePerHour", "Machine $/hr"],
-  ["packagingUsd", "Packaging $"],
-  ["shippingUsd", "Shipping $"],
+  ["packagingUsd", "Packaging $/unit"],
+  ["shippingUsd", "Shipping $/order"],
   ["failureRate", "Failure buffer (0–1)"],
   ["bottlePriceUsd", "Bottle price $"],
   ["bottleMassG", "Bottle mass g"],
   ["undercutPercent", "Undercut % (0–1)"],
   ["undercutExtraUsd", "Extra undercut $"],
   ["minMargin", "Min margin (0–1)"],
-  ["competitorPriceUsd", "Amazon product $"],
+  ["competitorPriceUsd", "Amazon product $/unit"],
 ];
 
-const API_TIMEOUT_MS = 12_000;
+function loadSession() {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed?.inputs && typeof parsed.inputs === "object") {
+      state.inputs = { ...defaultInputs(), ...parsed.inputs };
+    }
+    if (typeof parsed?.competitorAsin === "string") state.competitorAsin = parsed.competitorAsin;
+  } catch {
+    /* ignore corrupt session */
+  }
+}
+
+function saveSession() {
+  try {
+    sessionStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        inputs: state.inputs,
+        competitorAsin: state.competitorAsin,
+      }),
+    );
+  } catch {
+    /* private mode / quota */
+  }
+}
 
 async function api(path, options = {}) {
   const controller = new AbortController();
@@ -66,7 +100,7 @@ async function api(path, options = {}) {
     return data;
   } catch (err) {
     if (err?.name === "AbortError") {
-      throw new Error("Request timed out (Amazon/network). Try again or enter the price manually.");
+      throw new Error("Timed out waiting for Amazon/network. Enter the price manually and generate.");
     }
     throw err;
   } finally {
@@ -77,13 +111,14 @@ async function api(path, options = {}) {
 function readFieldsFromDom() {
   for (const [key] of fields) {
     const el = document.getElementById(key);
-    if (el && el.value !== "") {
-      const n = Number(el.value);
-      if (Number.isFinite(n)) state.inputs[key] = n;
-    }
+    if (!el) continue;
+    if (el.value === "") continue;
+    const n = Number(el.value);
+    if (Number.isFinite(n)) state.inputs[key] = n;
   }
   const asinEl = document.getElementById("competitorAsin");
   if (asinEl) state.competitorAsin = asinEl.value.trim();
+  saveSession();
 }
 
 function setStatus(text) {
@@ -101,15 +136,38 @@ function setError(text) {
   }
 }
 
+function paintPills() {
+  const market = state.market;
+  const pill = document.getElementById("resin-pill");
+  if (pill) {
+    pill.innerHTML = `
+      <span class="dot ${market?.warning ? "warn" : ""}"></span>
+      <span>Resin <strong>${money(market?.bottlePriceUsd ?? state.inputs.bottlePriceUsd)}</strong> / ${market?.bottleMassG || state.inputs.bottleMassG || 1000}g</span>
+    `;
+  }
+  const note = document.getElementById("competitor-note");
+  if (note) {
+    const competitor = state.competitor;
+    note.innerHTML = competitor
+      ? `${competitor.title ? `<strong>${competitor.title}</strong><br>` : ""}Listing ${competitor.priceUsd != null ? money(competitor.priceUsd) : "—"} · ${competitor.source}${competitor.elapsedMs != null ? ` · ${competitor.elapsedMs}ms` : ""}${competitor.warning ? ` · ${competitor.warning}` : ""}`
+      : `Fetch an ASIN <em>or</em> type Amazon product $/unit manually — Generate never waits on Amazon.`;
+  }
+  const warn = document.getElementById("warn-line");
+  if (warn) {
+    const bits = [market?.warning, state.competitor?.warning].filter(Boolean);
+    warn.hidden = bits.length === 0;
+    warn.textContent = bits.join(" · ");
+  }
+}
+
 function paintResults() {
   const host = document.getElementById("results");
   if (!host) return;
   const result = state.result;
   const c = result?.competitive;
-  const recommended = result?.recommended;
-
-  if (!recommended || !c) {
-    host.innerHTML = `<p class="note">Enter slicer grams + Amazon product price (fetch or type it), then generate.</p>`;
+  const insights = result?.insights;
+  if (!result || !c) {
+    host.innerHTML = `<p class="note">Quote appears here instantly from your numbers. Amazon fetches never block Generate.</p>`;
     return;
   }
 
@@ -117,7 +175,7 @@ function paintResults() {
     <div class="hero-quote">
       <div class="label">${c.viable ? "Recommended undercut" : "Blocked — use floor"}</div>
       <div class="amount">${money(c.recommendedUsd)}</div>
-      <div class="meta">${c.marginPercent}% margin · ${money(c.grossProfitUsd)} profit · cost ${money(c.costFloorUsd)}</div>
+      <div class="meta">${c.marginPercent}% margin · ${money(c.grossProfitUsd)} profit · ${money(c.recommendedPerUnitUsd)}/unit · cost ${money(c.costFloorUsd)}</div>
     </div>
     <p class="note">${c.message}</p>
     <div class="tiers">
@@ -134,12 +192,23 @@ function paintResults() {
     </div>
     <h2>Compare</h2>
     <div class="costs">
-      <div class="row"><span>Amazon listing</span><span>${c.amazonListingUsd != null ? money(c.amazonListingUsd) : "—"}</span></div>
-      <div class="row"><span>Your undercut</span><span>${c.undercutPriceUsd != null ? money(c.undercutPriceUsd) : "—"}</span></div>
+      <div class="row"><span>Amazon listing (order)</span><span>${c.amazonListingUsd != null ? money(c.amazonListingUsd) : "—"}</span></div>
+      <div class="row"><span>Your undercut (order)</span><span>${c.undercutPriceUsd != null ? money(c.undercutPriceUsd) : "—"}</span></div>
       <div class="row"><span>Savings vs Amazon</span><span>${c.savingsVsAmazonUsd != null ? `${money(c.savingsVsAmazonUsd)} (${c.savingsVsAmazonPercent}%)` : "—"}</span></div>
-      <div class="row"><span>Min viable (floor)</span><span>${money(c.minViableUsd)}</span></div>
-      <div class="row total"><span>Material from slicer</span><span>${money(result.costs.materialUsd)} · ${state.inputs.resinMassG}g</span></div>
+      <div class="row"><span>Min viable floor</span><span>${money(c.minViableUsd)}</span></div>
+      <div class="row total"><span>Material · ${state.inputs.resinMassG}g × ${result.costs.quantity}</span><span>${money(result.costs.materialUsd)}</span></div>
     </div>
+    ${
+      insights
+        ? `<h2>Insights</h2>
+      <div class="costs">
+        <div class="row"><span>Profit / print-hour</span><span>${insights.profitPerPrintHour != null ? money(insights.profitPerPrintHour) : "—"}</span></div>
+        <div class="row"><span>Resin share of cost</span><span>${insights.resinSharePercent}%</span></div>
+        <div class="row"><span>Max undercut still viable</span><span>${insights.maxViableUndercutPercent != null ? `${insights.maxViableUndercutPercent}%` : "—"}</span></div>
+        <div class="row"><span>Amazon clears floor?</span><span>${insights.amazonBeatsFloor == null ? "—" : insights.amazonBeatsFloor ? "yes" : "no"}</span></div>
+      </div>`
+        : ""
+    }
     <h2>Cost stack</h2>
     <div class="costs">
       <div class="row"><span>Material</span><span>${money(result.costs.materialUsd)}</span></div>
@@ -148,7 +217,7 @@ function paintResults() {
       <div class="row"><span>Failure buffer</span><span>${money(result.costs.failureBufferUsd)}</span></div>
       <div class="row"><span>Packaging</span><span>${money(result.costs.packagingUsd)}</span></div>
       <div class="row"><span>Shipping</span><span>${money(result.costs.shippingUsd)}</span></div>
-      <div class="row total"><span>Total cost</span><span>${money(result.costs.costTotalUsd)}</span></div>
+      <div class="row total"><span>Total · ${money(result.costs.costPerUnitUsd)}/unit</span><span>${money(result.costs.costTotalUsd)}</span></div>
     </div>
     <h2>HubSpot field map</h2>
     <div class="hubspot">
@@ -166,33 +235,15 @@ function paintResults() {
   document.getElementById("btn-copy")?.addEventListener("click", () => copyHubspot());
 }
 
-function paintPills() {
-  const market = state.market;
-  const pill = document.getElementById("resin-pill");
-  if (pill) {
-    pill.innerHTML = `
-      <span class="dot ${market?.warning ? "warn" : ""}"></span>
-      <span>Resin <strong>${market ? money(market.bottlePriceUsd) : money(state.inputs.bottlePriceUsd)}</strong> / ${market?.bottleMassG || state.inputs.bottleMassG || 1000}g</span>
-    `;
-  }
-  const note = document.getElementById("competitor-note");
-  if (note) {
-    const competitor = state.competitor;
-    note.innerHTML = competitor
-      ? `${competitor.title ? `<strong>${competitor.title}</strong><br>` : ""}Listing ${competitor.priceUsd != null ? money(competitor.priceUsd) : "—"} · ${competitor.source}${competitor.warning ? ` · ${competitor.warning}` : ""}`
-      : `Type/paste an ASIN and fetch, <em>or</em> type the Amazon product $ manually — generate does not need a fetch.`;
-  }
-  const warn = document.getElementById("warn-line");
-  if (warn) {
-    const bits = [market?.warning, state.competitor?.warning].filter(Boolean);
-    warn.hidden = bits.length === 0;
-    warn.textContent = bits.join(" · ");
-  }
+let priceTimer = null;
+function schedulePrice() {
+  clearTimeout(priceTimer);
+  priceTimer = setTimeout(() => price(), 200);
 }
 
 async function refreshResin(force = false) {
   setError(null);
-  setStatus(force ? "Refreshing Amazon resin bottle…" : "Loading resin bottle price…");
+  setStatus(force ? "Refreshing Amazon resin…" : "Loading resin bottle…");
   try {
     state.market = await api(`/api/resin-market${force ? "?force=1" : ""}`);
     if (state.market?.bottlePriceUsd) {
@@ -200,59 +251,65 @@ async function refreshResin(force = false) {
       state.inputs.bottleMassG = state.market.bottleMassG || 1000;
       const bottle = document.getElementById("bottlePriceUsd");
       const mass = document.getElementById("bottleMassG");
-      if (bottle) bottle.value = String(state.inputs.bottlePriceUsd);
-      if (mass) mass.value = String(state.inputs.bottleMassG);
+      if (bottle && document.activeElement !== bottle) bottle.value = String(state.inputs.bottlePriceUsd);
+      if (mass && document.activeElement !== mass) mass.value = String(state.inputs.bottleMassG);
+      saveSession();
     }
     paintPills();
-    setStatus(state.market?.cached ? "Resin price (cached)." : "Resin price updated.");
+    setStatus(state.market?.cached ? "Resin price cached." : "Resin price updated.");
+    schedulePrice();
   } catch (err) {
     setError(err.message);
-    setStatus("");
+    setStatus("Resin fetch failed — bottle $ field still works.");
   }
 }
 
 async function refreshCompetitor(force = false) {
   readFieldsFromDom();
   if (!state.competitorAsin) {
-    setError("Paste an Amazon ASIN or product URL for the item you are making.");
+    setError("Paste an Amazon ASIN or product URL for the finished item.");
     return;
   }
   setError(null);
-  setStatus("Fetching Amazon product listing…");
+  setStatus("Fetching Amazon product…");
   try {
     const q = encodeURIComponent(state.competitorAsin);
     state.competitor = await api(`/api/amazon-product?asin=${q}${force ? "&force=1" : ""}`);
     if (state.competitor?.priceUsd) {
       state.inputs.competitorPriceUsd = state.competitor.priceUsd;
       const el = document.getElementById("competitorPriceUsd");
-      if (el) el.value = String(state.competitor.priceUsd);
+      if (el && document.activeElement !== el) el.value = String(state.competitor.priceUsd);
+      saveSession();
     }
     paintPills();
     setStatus(
       state.competitor?.priceUsd != null
-        ? `Product listing ${money(state.competitor.priceUsd)}.`
-        : "No price parsed — enter Amazon product $ manually.",
+        ? `Product ${money(state.competitor.priceUsd)}.`
+        : "No price parsed — type Amazon product $ manually.",
     );
+    schedulePrice();
   } catch (err) {
     setError(err.message);
-    setStatus("");
+    setStatus("Product fetch failed — type the listing $ and generate.");
   }
 }
 
 async function price() {
   readFieldsFromDom();
+  const seq = ++state.priceSeq;
   setError(null);
-  setStatus("Calculating best undercut…");
+  setStatus("Calculating…");
   try {
-    const payload = { ...state.inputs };
     const data = await api("/api/price", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify(state.inputs),
     });
+    if (seq !== state.priceSeq) return; // stale response
     state.result = data.result;
     paintResults();
-    setStatus(state.result?.competitive?.viable ? "Ready." : "Check warning — undercut blocked by cost floor.");
+    setStatus(state.result?.competitive?.viable ? "Ready." : "Undercut blocked by cost floor.");
   } catch (err) {
+    if (seq !== state.priceSeq) return;
     setError(err.message);
     setStatus("");
   }
@@ -284,7 +341,7 @@ function renderShell() {
       <div class="brand">
         <div class="brand-kicker">Print Operations · Tool</div>
         <h1>Pricing Matrix</h1>
-        <p>Slicer grams × bottle cost vs Amazon listing — undercut the listing and keep the highest profit above your floor.</p>
+        <p>Slicer grams × bottle cost vs Amazon listing — undercut for max profit above your floor. Amazon never blocks Generate.</p>
       </div>
       <div class="live-pill" id="resin-pill"></div>
     </header>
@@ -297,7 +354,7 @@ function renderShell() {
         <h2 style="margin-top:1.1rem">2 · Amazon product you compete with</h2>
         <div class="field full">
           <label for="competitorAsin">Amazon ASIN or product URL</label>
-          <input id="competitorAsin" type="text" placeholder="B0XXXXXXXX or https://www.amazon.com/dp/..." value="" />
+          <input id="competitorAsin" type="text" placeholder="B0XXXXXXXX or https://www.amazon.com/dp/..." />
         </div>
         <p class="note" id="competitor-note"></p>
 
@@ -330,24 +387,32 @@ function renderShell() {
     input.value = state.inputs[key] ?? "";
     input.addEventListener("input", () => {
       const n = Number(input.value);
-      if (Number.isFinite(n)) state.inputs[key] = n;
+      if (Number.isFinite(n)) {
+        state.inputs[key] = n;
+        saveSession();
+        schedulePrice();
+      }
     });
     wrap.appendChild(input);
     fieldsEl.appendChild(wrap);
   }
 
+  const asin = document.getElementById("competitorAsin");
+  asin.value = state.competitorAsin;
+  asin.addEventListener("input", (e) => {
+    state.competitorAsin = e.target.value.trim();
+    saveSession();
+  });
+
   document.getElementById("btn-price").addEventListener("click", () => price());
   document.getElementById("btn-comp").addEventListener("click", () => refreshCompetitor(true));
   document.getElementById("btn-resin").addEventListener("click", () => refreshResin(true));
-  document.getElementById("competitorAsin").addEventListener("input", (e) => {
-    state.competitorAsin = e.target.value.trim();
-  });
 
   paintPills();
   paintResults();
 }
 
+loadSession();
 renderShell();
-// Instant local quote from defaults (no Amazon wait), then refresh resin in background.
 price();
 refreshResin(false);
