@@ -4,4 +4,6 @@ dist/
 .env.local
 *.log
 .DS_Store
-data/
+data/warhammer/*.db
+data/warhammer/*.db-*
+data/warhammer/overrides.json

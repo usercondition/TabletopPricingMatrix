@@ -55,7 +55,7 @@ const fields = [
   ["undercutPercent", "Undercut % (0–1)"],
   ["undercutExtraUsd", "Extra undercut $"],
   ["minMargin", "Min margin (0–1)"],
-  ["competitorPriceUsd", "Amazon product $/unit"],
+  ["competitorPriceUsd", "Competitor RRP $/unit"],
 ];
 
 function loadSession() {
@@ -351,9 +351,16 @@ function renderShell() {
         <h2>1 · Real costs</h2>
         <div class="grid" id="fields"></div>
 
-        <h2 style="margin-top:1.1rem">2 · Amazon product you compete with</h2>
+        <h2 style="margin-top:1.1rem">2 · Competitor price (Warhammer or Amazon)</h2>
         <div class="field full">
-          <label for="competitorAsin">Amazon ASIN or product URL</label>
+          <label for="wh-search">Search Warhammer catalog</label>
+          <input id="wh-search" type="search" placeholder="e.g. Intercessors, Necron Warriors, Combat Patrol…" />
+        </div>
+        <div id="wh-results" class="wh-results"></div>
+        <p class="note" id="wh-meta"></p>
+
+        <div class="field full">
+          <label for="competitorAsin">Or Amazon ASIN / product URL</label>
           <input id="competitorAsin" type="text" placeholder="B0XXXXXXXX or https://www.amazon.com/dp/..." />
         </div>
         <p class="note" id="competitor-note"></p>
@@ -408,8 +415,67 @@ function renderShell() {
   document.getElementById("btn-comp").addEventListener("click", () => refreshCompetitor(true));
   document.getElementById("btn-resin").addEventListener("click", () => refreshResin(true));
 
+  const wh = document.getElementById("wh-search");
+  let whTimer = null;
+  wh.addEventListener("input", () => {
+    clearTimeout(whTimer);
+    whTimer = setTimeout(() => searchWarhammer(wh.value), 180);
+  });
+
   paintPills();
   paintResults();
+  loadWarhammerMeta();
+  searchWarhammer("");
+}
+
+async function loadWarhammerMeta() {
+  try {
+    const stats = await api("/api/warhammer/stats");
+    const el = document.getElementById("wh-meta");
+    if (el) {
+      el.textContent = `Catalog: ${stats.total} kits · ${stats.factions} factions · unofficial RRP snapshot — verify before selling.`;
+    }
+  } catch {
+    /* optional */
+  }
+}
+
+async function searchWarhammer(query) {
+  const host = document.getElementById("wh-results");
+  if (!host) return;
+  try {
+    const data = await api(`/api/warhammer/search?q=${encodeURIComponent(query || "")}&limit=12`);
+    if (!data.units?.length) {
+      host.innerHTML = `<p class="note">No matches.</p>`;
+      return;
+    }
+    host.innerHTML = data.units
+      .map(
+        (u) => `
+      <button type="button" class="wh-row" data-id="${u.id}" data-price="${u.gwPriceUsd}">
+        <span class="wh-name">${u.name}</span>
+        <span class="wh-meta-line">${u.faction}${u.modelCount ? ` · ${u.modelCount} models` : ""}</span>
+        <span class="wh-price">${money(u.gwPriceUsd)}</span>
+      </button>`,
+      )
+      .join("");
+    host.querySelectorAll(".wh-row").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const priceVal = Number(btn.getAttribute("data-price"));
+        const id = btn.getAttribute("data-id");
+        if (!Number.isFinite(priceVal)) return;
+        state.inputs.competitorPriceUsd = priceVal;
+        state.selectedWarhammerId = id;
+        const el = document.getElementById("competitorPriceUsd");
+        if (el) el.value = String(priceVal);
+        saveSession();
+        setStatus(`Warhammer kit selected · RRP ${money(priceVal)} — generating undercut.`);
+        schedulePrice();
+      });
+    });
+  } catch (err) {
+    host.innerHTML = `<p class="note">Catalog unavailable: ${err.message}</p>`;
+  }
 }
 
 loadSession();

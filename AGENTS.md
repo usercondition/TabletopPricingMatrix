@@ -9,8 +9,14 @@
 Flow:
 1. Slicer resin grams × live Amazon bottle cost → material
 2. Cost stack → min-margin floor
-3. Amazon listing for the finished item → undercut while maximizing profit
+3. Warhammer catalog RRP (SQLite) and/or Amazon listing → undercut while maximizing profit
 4. Map to HubSpot fields
+
+### Warhammer catalog
+
+- Auto-seeds from `data/warhammer/seed.json` into `data/warhammer/catalog.db` on server boot (DB is gitignored).
+- Search UI fills `competitorPriceUsd`; import more kits via `POST /api/warhammer/import`.
+- Prices are unofficial snapshots — not live GW scrapes (blocked in this environment).
 
 ### Reliability / hang prevention
 

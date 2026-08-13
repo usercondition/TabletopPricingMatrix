@@ -1,15 +1,22 @@
 # Tabletop Pricing Matrix
 
-Quote generator for resin print jobs that **undercuts Amazon** while maximizing profit.
+Quote generator for resin print jobs that **undercuts Warhammer RRP / Amazon** while maximizing profit.
 
 ## How it prices
 
 1. **Slicer grams** × **live bottle cost** (Amazon resin ASIN) → material  
 2. Add labor, machine, failure buffer, pack, ship → **cost floor** (supports **quantity**)  
-3. Fetch the **Amazon listing** for the finished item you compete with  
-4. Recommend the **highest price that still undercuts** Amazon (default 5%), unless that drops below your min-margin floor  
+3. Pick a **Warhammer kit** from the local SQLite catalog (or fetch an Amazon listing) as the competitor price  
+4. Recommend the **highest price that still undercuts** that RRP (default 5%), unless that drops below your min-margin floor  
 
 Generate never blocks on Amazon — type listing `$` manually anytime.
+
+## Warhammer price catalog
+
+- Seed JSON: `data/warhammer/seed.json` (~117 kits, unofficial USD RRP snapshots)
+- Local DB: `data/warhammer/catalog.db` (created on boot / `npm run seed:warhammer`)
+- APIs: `GET /api/warhammer/search?q=…`, `/stats`, `/factions`, `/:id`; `POST /api/warhammer/import`, `/reseed`
+- Not affiliated with Games Workshop — verify prices before selling
 
 ## Reliability
 
