@@ -4,22 +4,24 @@
 
 ### Product
 
-**Tabletop Pricing Matrix** — resin-print quote generator. Express API + static Vite client.
+**Tabletop Pricing Matrix** — competitive resin-print quote tool.
+
+Core flow:
+1. Slicer resin grams × live Amazon bottle cost → material
+2. Full cost stack → min-margin floor
+3. Amazon listing for the finished product → undercut while maximizing profit
+4. Map to HubSpot Print Operations fields
 
 ### Services
 
-| Service | Command | Notes |
+| Service | Command | Port |
 |---|---|---|
-| Pricing app (dev) | `npm run build && npm run dev` | Listens on `PORT` or `4177`. |
-| Tests | `npm test` | Node test runner. |
-| Typecheck | `npm run lint` | `tsc --noEmit`. |
+| App | `npm run build && npm run start` (or `npm run dev`) | `PORT` or `4177` |
+| Tests | `npm test` | |
+| Lint | `npm run lint` | |
 
-No database. Amazon resin price is best-effort HTML parse with cache/fallback.
-
-### Dependency refresh
-
-`npm install` (see `.cursor/environment.json`).
+Amazon HTML price parse is best-effort (cache + manual fallback).
 
 ### Print Operations
 
-This tool is linked from HubSpotHost Print Operations **Tools** nav. Deploy URL goes in `PRICING_MATRIX_URL` on that service.
+Link from HubSpotHost Tools via `PRICING_MATRIX_URL`. Patch in `patches/`.

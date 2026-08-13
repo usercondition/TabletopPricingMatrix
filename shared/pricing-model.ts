@@ -1,37 +1,39 @@
 /**
- * Quote pricing matrix for resin print jobs.
+ * Competitive quote engine for resin print jobs.
  *
- * Aligns with Print Operations profit math:
- *   gross = amount - material - labor - packaging - shipping
- *   margin% = (gross / amount) * 100
+ * Real inputs:
+ *   - slicer resin grams
+ *   - current bottle cost (Amazon / manual)
+ *   - Amazon listing price of the finished item you compete with
  *
- * Machine time is rolled into labor for HubSpot fields, but tracked
- * separately here so quotes reflect printer amortization.
+ * Goal: undercut Amazon while maximizing profit above a cost floor.
  */
 
 export interface PricingInputs {
   /** Resin used in grams (from slicer / CTB). */
   resinMassG: number;
-  /** Optional volume; used when mass is 0 and $/ml is known. */
   resinVolumeMl: number;
-  /** Live or manual bottle economics. */
+  /** Bottle economics (live Amazon resin or manual). */
   bottlePriceUsd: number;
   bottleMassG: number;
   bottleVolumeMl: number | null;
-  /** Pure hands-on minutes (post-process, packing, QA). */
+  /** Amazon listing price for the product you are making / competing with. */
+  competitorPriceUsd: number;
+  /** Undercut Amazon by this fraction (0.05 = 5% cheaper). */
+  undercutPercent: number;
+  /** Optional flat extra undercut in dollars (added on top of %). */
+  undercutExtraUsd: number;
   laborMinutes: number;
   laborRatePerHour: number;
-  /** Machine print hours (amortization + electricity proxy). */
   printHours: number;
   machineRatePerHour: number;
   packagingUsd: number;
   shippingUsd: number;
-  /** Extra material+machine buffer for failed plates (0–1). */
   failureRate: number;
-  /** Target / stretch margin fractions (0–1). */
+  /** Never recommend below this margin even to undercut. */
+  minMargin: number;
+  /** Soft target margin used when no competitor price is available. */
   targetMargin: number;
-  stretchMargin: number;
-  floorMargin: number;
 }
 
 export interface CostBreakdown {
@@ -46,8 +48,28 @@ export interface CostBreakdown {
   usdPerMl: number | null;
 }
 
+export type QuoteStrategy =
+  | "undercut_max_profit"
+  | "cost_floor_blocked"
+  | "no_competitor_target_margin";
+
+export interface CompetitiveQuote {
+  strategy: QuoteStrategy;
+  amazonListingUsd: number | null;
+  undercutPriceUsd: number | null;
+  costFloorUsd: number;
+  minViableUsd: number;
+  recommendedUsd: number;
+  savingsVsAmazonUsd: number | null;
+  savingsVsAmazonPercent: number | null;
+  grossProfitUsd: number;
+  marginPercent: number;
+  viable: boolean;
+  message: string;
+}
+
 export interface QuoteTier {
-  id: "floor" | "target" | "stretch";
+  id: "floor" | "undercut" | "amazon" | "target";
   label: string;
   amountUsd: number;
   marginPercent: number;
@@ -55,19 +77,11 @@ export interface QuoteTier {
   rationale: string;
 }
 
-export interface MarketBand {
-  id: string;
-  label: string;
-  lowUsd: number;
-  highUsd: number;
-  basis: string;
-}
-
 export interface PricingResult {
   costs: CostBreakdown;
+  competitive: CompetitiveQuote;
   tiers: QuoteTier[];
   recommended: QuoteTier;
-  marketBands: MarketBand[];
   hubspotFields: {
     print_material_cost: number;
     print_labor_cost: number;
@@ -118,11 +132,11 @@ export function computeCosts(input: PricingInputs): CostBreakdown {
 
   const laborUsd = (Math.max(0, input.laborMinutes) / 60) * Math.max(0, input.laborRatePerHour);
   const machineUsd = Math.max(0, input.printHours) * Math.max(0, input.machineRatePerHour);
-  const failureBufferUsd =
-    (materialUsd + machineUsd) * clamp(input.failureRate, 0, 1);
+  const failureBufferUsd = (materialUsd + machineUsd) * clamp(input.failureRate, 0, 1);
   const packagingUsd = Math.max(0, input.packagingUsd);
   const shippingUsd = Math.max(0, input.shippingUsd);
-  const costTotalUsd = materialUsd + laborUsd + machineUsd + failureBufferUsd + packagingUsd + shippingUsd;
+  const costTotalUsd =
+    materialUsd + laborUsd + machineUsd + failureBufferUsd + packagingUsd + shippingUsd;
 
   return {
     materialUsd: round2(materialUsd),
@@ -137,89 +151,169 @@ export function computeCosts(input: PricingInputs): CostBreakdown {
   };
 }
 
-export function marketBandsForJob(input: PricingInputs, costs: CostBreakdown): MarketBand[] {
-  const mass = input.resinMassG > 0 ? input.resinMassG : input.resinVolumeMl * 1.1;
-  const hours = Math.max(input.printHours, 0.25);
+/**
+ * Highest price that still undercuts Amazon, without going below min-margin floor.
+ * That maximizes profit among undercutting prices.
+ */
+export function computeCompetitiveQuote(
+  input: PricingInputs,
+  costs: CostBreakdown,
+): CompetitiveQuote {
+  const minViableUsd = amountForMargin(costs.costTotalUsd, input.minMargin);
+  const amazon = input.competitorPriceUsd > 0 ? round2(input.competitorPriceUsd) : null;
 
-  // Published hobby/mini resin commission bands (USD), used as external anchors.
-  const perGramLow = mass * 0.12;
-  const perGramHigh = mass * 0.45;
-  const perHourLow = hours * 8;
-  const perHourHigh = hours * 25;
+  if (amazon === null) {
+    const recommendedUsd = amountForMargin(costs.costTotalUsd, input.targetMargin);
+    return {
+      strategy: "no_competitor_target_margin",
+      amazonListingUsd: null,
+      undercutPriceUsd: null,
+      costFloorUsd: costs.costTotalUsd,
+      minViableUsd,
+      recommendedUsd,
+      savingsVsAmazonUsd: null,
+      savingsVsAmazonPercent: null,
+      grossProfitUsd: round2(recommendedUsd - costs.costTotalUsd),
+      marginPercent: marginForAmount(recommendedUsd, costs.costTotalUsd),
+      viable: recommendedUsd >= minViableUsd,
+      message:
+        "No Amazon product price yet — using target margin. Paste a competitor ASIN to undercut.",
+    };
+  }
 
-  return [
-    {
-      id: "per_gram",
-      label: "Market · resin mass",
-      lowUsd: round2(perGramLow + costs.packagingUsd + costs.shippingUsd),
-      highUsd: round2(perGramHigh + costs.packagingUsd + costs.shippingUsd),
-      basis: "$0.12–$0.45 / g resin (commission-shop ranges) + pack/ship",
-    },
-    {
-      id: "per_hour",
-      label: "Market · machine time",
-      lowUsd: round2(perHourLow + costs.materialUsd + costs.packagingUsd + costs.shippingUsd),
-      highUsd: round2(perHourHigh + costs.materialUsd + costs.packagingUsd + costs.shippingUsd),
-      basis: "$8–$25 / print-hour + material + pack/ship",
-    },
-  ];
+  const undercutPct = clamp(input.undercutPercent, 0, 0.5);
+  const undercutExtra = Math.max(0, input.undercutExtraUsd);
+  // Max profit while undercutting = price just under Amazon by the chosen undercut.
+  const undercutPriceUsd = round2(amazon * (1 - undercutPct) - undercutExtra);
+
+  if (undercutPriceUsd < minViableUsd) {
+    return {
+      strategy: "cost_floor_blocked",
+      amazonListingUsd: amazon,
+      undercutPriceUsd,
+      costFloorUsd: costs.costTotalUsd,
+      minViableUsd,
+      recommendedUsd: minViableUsd,
+      savingsVsAmazonUsd: round2(amazon - minViableUsd),
+      savingsVsAmazonPercent: round2(((amazon - minViableUsd) / amazon) * 100),
+      grossProfitUsd: round2(minViableUsd - costs.costTotalUsd),
+      marginPercent: marginForAmount(minViableUsd, costs.costTotalUsd),
+      viable: false,
+      message: `Undercut ($${undercutPriceUsd.toFixed(2)}) is below your min-margin floor ($${minViableUsd.toFixed(2)}). Do not match Amazon that low — quote the floor or skip the job.`,
+    };
+  }
+
+  return {
+    strategy: "undercut_max_profit",
+    amazonListingUsd: amazon,
+    undercutPriceUsd,
+    costFloorUsd: costs.costTotalUsd,
+    minViableUsd,
+    recommendedUsd: undercutPriceUsd,
+    savingsVsAmazonUsd: round2(amazon - undercutPriceUsd),
+    savingsVsAmazonPercent: round2(((amazon - undercutPriceUsd) / amazon) * 100),
+    grossProfitUsd: round2(undercutPriceUsd - costs.costTotalUsd),
+    marginPercent: marginForAmount(undercutPriceUsd, costs.costTotalUsd),
+    viable: true,
+    message: `Best profit while undercutting Amazon by ${round2(undercutPct * 100)}%${undercutExtra > 0 ? ` + $${undercutExtra.toFixed(2)}` : ""}.`,
+  };
+}
+
+function tier(
+  id: QuoteTier["id"],
+  label: string,
+  amountUsd: number,
+  costTotal: number,
+  rationale: string,
+): QuoteTier {
+  return {
+    id,
+    label,
+    amountUsd,
+    marginPercent: marginForAmount(amountUsd, costTotal),
+    grossProfitUsd: round2(amountUsd - costTotal),
+    rationale,
+  };
 }
 
 export function generatePricing(input: PricingInputs): PricingResult {
   const costs = computeCosts(input);
-  const floorM = clamp(input.floorMargin, 0, 0.9);
-  const targetM = clamp(input.targetMargin, 0, 0.9);
-  const stretchM = clamp(input.stretchMargin, 0, 0.9);
+  const competitive = computeCompetitiveQuote(input, costs);
 
-  const tiers: QuoteTier[] = (
-    [
-      {
-        id: "floor" as const,
-        label: "Floor",
-        amountUsd: amountForMargin(costs.costTotalUsd, floorM),
-        marginPercent: round2(floorM * 100),
-        grossProfitUsd: 0,
-        rationale: "Minimum sustainable quote — covers costs with a thin buffer.",
-      },
-      {
-        id: "target" as const,
-        label: "Target",
-        amountUsd: amountForMargin(costs.costTotalUsd, targetM),
-        marginPercent: round2(targetM * 100),
-        grossProfitUsd: 0,
-        rationale: "Matches Print Operations healthy-margin target (default 40%).",
-      },
-      {
-        id: "stretch" as const,
-        label: "Stretch",
-        amountUsd: amountForMargin(costs.costTotalUsd, stretchM),
-        marginPercent: round2(stretchM * 100),
-        grossProfitUsd: 0,
-        rationale: "Premium / rush / complex geometry pricing.",
-      },
-    ] satisfies QuoteTier[]
-  ).map((tier) => ({
-    ...tier,
-    grossProfitUsd: round2(tier.amountUsd - costs.costTotalUsd),
-  }));
+  const tiers: QuoteTier[] = [
+    tier(
+      "floor",
+      "Cost floor",
+      competitive.minViableUsd,
+      costs.costTotalUsd,
+      `Min viable at ${round2(input.minMargin * 100)}% margin — never go below.`,
+    ),
+  ];
 
-  const recommended = tiers.find((t) => t.id === "target") ?? tiers[1];
-  const bands = marketBandsForJob(input, costs);
+  if (competitive.undercutPriceUsd !== null) {
+    tiers.push(
+      tier(
+        "undercut",
+        "Undercut",
+        competitive.undercutPriceUsd,
+        costs.costTotalUsd,
+        "Amazon listing minus your undercut — max profit while still cheaper.",
+      ),
+    );
+  }
 
-  // HubSpot labor field absorbs machine time so existing profit calc stays unchanged.
+  if (competitive.amazonListingUsd !== null) {
+    tiers.push(
+      tier(
+        "amazon",
+        "Amazon list",
+        competitive.amazonListingUsd,
+        costs.costTotalUsd,
+        "Competitor Amazon buy-box / list price (do not exceed if you want to undercut).",
+      ),
+    );
+  } else {
+    tiers.push(
+      tier(
+        "target",
+        "Target margin",
+        amountForMargin(costs.costTotalUsd, input.targetMargin),
+        costs.costTotalUsd,
+        "Fallback when no Amazon product ASIN is set.",
+      ),
+    );
+  }
+
+  const recommended =
+    tiers.find((t) =>
+      competitive.strategy === "undercut_max_profit"
+        ? t.id === "undercut"
+        : competitive.strategy === "cost_floor_blocked"
+          ? t.id === "floor"
+          : t.id === "target" || t.id === "floor",
+    ) ?? tiers[0];
+
+  // Prefer explicit competitive recommendation amount on the chosen tier.
+  const recommendedTier: QuoteTier = {
+    ...recommended,
+    amountUsd: competitive.recommendedUsd,
+    marginPercent: competitive.marginPercent,
+    grossProfitUsd: competitive.grossProfitUsd,
+  };
+
   const hubspotLabor = round2(costs.laborUsd + costs.machineUsd + costs.failureBufferUsd);
 
   return {
     costs,
+    competitive,
     tiers,
-    recommended,
-    marketBands: bands,
+    recommended: recommendedTier,
     hubspotFields: {
       print_material_cost: costs.materialUsd,
       print_labor_cost: hubspotLabor,
       print_packaging_cost: costs.packagingUsd,
       print_actual_shipping_cost: costs.shippingUsd,
-      suggested_amount: recommended.amountUsd,
+      suggested_amount: competitive.recommendedUsd,
     },
   };
 }
@@ -230,6 +324,9 @@ export const DEFAULT_INPUTS: PricingInputs = {
   bottlePriceUsd: 28,
   bottleMassG: 1000,
   bottleVolumeMl: null,
+  competitorPriceUsd: 0,
+  undercutPercent: 0.05,
+  undercutExtraUsd: 0,
   laborMinutes: 45,
   laborRatePerHour: 35,
   printHours: 6,
@@ -237,7 +334,6 @@ export const DEFAULT_INPUTS: PricingInputs = {
   packagingUsd: 4,
   shippingUsd: 8,
   failureRate: 0.08,
-  floorMargin: 0.25,
+  minMargin: 0.25,
   targetMargin: 0.4,
-  stretchMargin: 0.55,
 };

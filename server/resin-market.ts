@@ -6,23 +6,29 @@ export const DEFAULT_BOTTLE_MASS_G = 1000;
 export const AMAZON_FETCH_TIMEOUT_MS = 10_000;
 export const AMAZON_PRICE_CACHE_MS = 6 * 60 * 60 * 1000;
 
-export interface MarketResinPrice {
+export interface AmazonListingPrice {
   asin: string;
-  name: string;
-  bottlePriceUsd: number;
-  bottleMassG: number;
-  source: "amazon" | "manual" | "fallback";
+  title: string | null;
+  priceUsd: number | null;
+  source: "amazon" | "manual" | "fallback" | "unavailable";
   fetchedAt: string | null;
   cached: boolean;
   url: string;
   warning?: string;
 }
 
-let cache: {
-  price: number;
-  fetchedAtMs: number;
-  asin: string;
-} | null = null;
+type CacheEntry = { price: number; title: string | null; fetchedAtMs: number };
+const cache = new Map<string, CacheEntry>();
+
+export function parseAsin(input: string): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  const fromUrl = raw.match(/(?:dp|gp\/product|asin)\/([A-Z0-9]{10})/i);
+  if (fromUrl) return fromUrl[1].toUpperCase();
+  const bare = raw.match(/\b([A-Z0-9]{10})\b/i);
+  if (bare && /^[A-Z0-9]{10}$/i.test(bare[1])) return bare[1].toUpperCase();
+  return null;
+}
 
 export function parseAmazonProductPrice(html: string): number | null {
   const priceToPay = html.match(/"priceToPay"\s*:\s*\{[^}]*"amount"\s*:\s*([0-9]+(?:\.[0-9]+)?)/i);
@@ -50,29 +56,46 @@ export function parseAmazonProductPrice(html: string): number | null {
   return null;
 }
 
-export async function fetchAmazonResinPrice(options?: {
-  asin?: string;
+export function parseAmazonProductTitle(html: string): string | null {
+  const meta = html.match(/id="productTitle"[^>]*>\s*([^<]+)\s*</i);
+  if (meta) return meta[1].replace(/\s+/g, " ").trim().slice(0, 160) || null;
+  const og = html.match(/property="og:title"\s+content="([^"]+)"/i);
+  if (og) return og[1].replace(/\s+/g, " ").trim().slice(0, 160) || null;
+  return null;
+}
+
+export async function fetchAmazonListing(options: {
+  asinOrUrl: string;
   fetchImpl?: typeof fetch;
   force?: boolean;
-}): Promise<MarketResinPrice> {
-  const asin = (options?.asin ?? DEFAULT_RESIN_ASIN).trim().toUpperCase();
-  const url = `https://www.amazon.com/dp/${asin}`;
-  const fetchImpl = options?.fetchImpl ?? fetch;
-  const now = Date.now();
+  fallbackPrice?: number;
+  label?: string;
+}): Promise<AmazonListingPrice> {
+  const asin = parseAsin(options.asinOrUrl);
+  const url = asin ? `https://www.amazon.com/dp/${asin}` : options.asinOrUrl.trim();
+  if (!asin) {
+    return {
+      asin: "",
+      title: null,
+      priceUsd: options.fallbackPrice ?? null,
+      source: "unavailable",
+      fetchedAt: null,
+      cached: false,
+      url,
+      warning: "Enter a valid Amazon ASIN or product URL.",
+    };
+  }
 
-  if (
-    !options?.force &&
-    cache &&
-    cache.asin === asin &&
-    now - cache.fetchedAtMs < AMAZON_PRICE_CACHE_MS
-  ) {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const now = Date.now();
+  const hit = cache.get(asin);
+  if (!options.force && hit && now - hit.fetchedAtMs < AMAZON_PRICE_CACHE_MS) {
     return {
       asin,
-      name: DEFAULT_RESIN_NAME,
-      bottlePriceUsd: cache.price,
-      bottleMassG: DEFAULT_BOTTLE_MASS_G,
+      title: hit.title,
+      priceUsd: hit.price,
       source: "amazon",
-      fetchedAt: new Date(cache.fetchedAtMs).toISOString(),
+      fetchedAt: new Date(hit.fetchedAtMs).toISOString(),
       cached: true,
       url,
     };
@@ -92,23 +115,19 @@ export async function fetchAmazonResinPrice(options?: {
         "accept-language": "en-US,en;q=0.9",
       },
     });
-    if (!response.ok) {
-      throw new Error(`Amazon returned HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Amazon returned HTTP ${response.status}`);
     const html = await response.text();
     if (/enter the characters you see|robot check|api-services-support@amazon\.com/i.test(html)) {
       throw new Error("Amazon blocked the live price request");
     }
     const price = parseAmazonProductPrice(html);
-    if (price === null) {
-      throw new Error("Could not parse Amazon buy-box price");
-    }
-    cache = { price, fetchedAtMs: now, asin };
+    if (price === null) throw new Error("Could not parse Amazon buy-box price");
+    const title = parseAmazonProductTitle(html);
+    cache.set(asin, { price, title, fetchedAtMs: now });
     return {
       asin,
-      name: DEFAULT_RESIN_NAME,
-      bottlePriceUsd: price,
-      bottleMassG: DEFAULT_BOTTLE_MASS_G,
+      title,
+      priceUsd: price,
       source: "amazon",
       fetchedAt: new Date(now).toISOString(),
       cached: false,
@@ -116,19 +135,68 @@ export async function fetchAmazonResinPrice(options?: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Amazon fetch failed";
-    const fallback = cache?.asin === asin ? cache.price : 28;
+    if (hit) {
+      return {
+        asin,
+        title: hit.title,
+        priceUsd: hit.price,
+        source: "amazon",
+        fetchedAt: new Date(hit.fetchedAtMs).toISOString(),
+        cached: true,
+        url,
+        warning: `${message}. Using cached $${hit.price.toFixed(2)}.`,
+      };
+    }
+    const fallback = options.fallbackPrice;
     return {
       asin,
-      name: DEFAULT_RESIN_NAME,
-      bottlePriceUsd: fallback,
-      bottleMassG: DEFAULT_BOTTLE_MASS_G,
-      source: cache?.asin === asin ? "amazon" : "fallback",
-      fetchedAt: cache?.asin === asin ? new Date(cache.fetchedAtMs).toISOString() : null,
-      cached: Boolean(cache?.asin === asin),
+      title: options.label ?? null,
+      priceUsd: fallback ?? null,
+      source: fallback !== undefined ? "fallback" : "unavailable",
+      fetchedAt: null,
+      cached: false,
       url,
-      warning: `${message}. Using ${cache?.asin === asin ? "cached" : "fallback"} bottle price $${fallback.toFixed(2)}.`,
+      warning:
+        fallback !== undefined
+          ? `${message}. Using fallback $${fallback.toFixed(2)}.`
+          : `${message}. Enter the Amazon price manually.`,
     };
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function fetchAmazonResinPrice(options?: {
+  asin?: string;
+  fetchImpl?: typeof fetch;
+  force?: boolean;
+}): Promise<{
+  asin: string;
+  name: string;
+  bottlePriceUsd: number;
+  bottleMassG: number;
+  source: AmazonListingPrice["source"];
+  fetchedAt: string | null;
+  cached: boolean;
+  url: string;
+  warning?: string;
+}> {
+  const listing = await fetchAmazonListing({
+    asinOrUrl: options?.asin ?? DEFAULT_RESIN_ASIN,
+    fetchImpl: options?.fetchImpl,
+    force: options?.force,
+    fallbackPrice: 28,
+    label: DEFAULT_RESIN_NAME,
+  });
+  return {
+    asin: listing.asin || DEFAULT_RESIN_ASIN,
+    name: listing.title || DEFAULT_RESIN_NAME,
+    bottlePriceUsd: listing.priceUsd ?? 28,
+    bottleMassG: DEFAULT_BOTTLE_MASS_G,
+    source: listing.source,
+    fetchedAt: listing.fetchedAt,
+    cached: listing.cached,
+    url: listing.url,
+    warning: listing.warning,
+  };
 }

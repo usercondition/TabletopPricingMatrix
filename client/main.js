@@ -11,6 +11,9 @@ const state = {
     bottlePriceUsd: 28,
     bottleMassG: 1000,
     bottleVolumeMl: null,
+    competitorPriceUsd: 0,
+    undercutPercent: 0.05,
+    undercutExtraUsd: 0,
     laborMinutes: 45,
     laborRatePerHour: 35,
     printHours: 6,
@@ -18,10 +21,11 @@ const state = {
     packagingUsd: 4,
     shippingUsd: 8,
     failureRate: 0.08,
-    floorMargin: 0.25,
+    minMargin: 0.25,
     targetMargin: 0.4,
-    stretchMargin: 0.55,
   },
+  competitorAsin: "",
+  competitor: null,
   market: null,
   result: null,
   busy: false,
@@ -30,18 +34,20 @@ const state = {
 };
 
 const fields = [
-  ["resinMassG", "Resin mass (g)", "from slicer / CTB"],
-  ["printHours", "Print hours", "machine time"],
-  ["laborMinutes", "Labor minutes", "wash, cure, pack, QA"],
-  ["laborRatePerHour", "Labor rate ($/hr)", ""],
-  ["machineRatePerHour", "Machine rate ($/hr)", "amortization + power"],
-  ["packagingUsd", "Packaging ($)", ""],
-  ["shippingUsd", "Shipping ($)", ""],
-  ["failureRate", "Failure buffer (0–1)", "e.g. 0.08 = 8%"],
-  ["bottlePriceUsd", "Bottle price ($)", "live Amazon or manual"],
-  ["bottleMassG", "Bottle mass (g)", "usually 1000"],
-  ["targetMargin", "Target margin (0–1)", "Print Ops default 0.40"],
-  ["stretchMargin", "Stretch margin (0–1)", ""],
+  ["resinMassG", "Slicer resin (g)"],
+  ["printHours", "Print hours"],
+  ["laborMinutes", "Labor minutes"],
+  ["laborRatePerHour", "Labor $/hr"],
+  ["machineRatePerHour", "Machine $/hr"],
+  ["packagingUsd", "Packaging $"],
+  ["shippingUsd", "Shipping $"],
+  ["failureRate", "Failure buffer (0–1)"],
+  ["bottlePriceUsd", "Bottle price $"],
+  ["bottleMassG", "Bottle mass g"],
+  ["undercutPercent", "Undercut % (0–1)"],
+  ["undercutExtraUsd", "Extra undercut $"],
+  ["minMargin", "Min margin (0–1)"],
+  ["competitorPriceUsd", "Amazon product $"],
 ];
 
 async function api(path, options) {
@@ -54,7 +60,16 @@ async function api(path, options) {
   return data;
 }
 
-async function refreshMarket(force = false) {
+function readFieldsFromDom() {
+  for (const [key] of fields) {
+    const el = document.getElementById(key);
+    if (el && el.value !== "") state.inputs[key] = Number(el.value);
+  }
+  const asinEl = document.getElementById("competitorAsin");
+  if (asinEl) state.competitorAsin = asinEl.value.trim();
+}
+
+async function refreshResin(force = false) {
   state.busy = true;
   state.error = null;
   render();
@@ -72,11 +87,36 @@ async function refreshMarket(force = false) {
   }
 }
 
+async function refreshCompetitor(force = false) {
+  readFieldsFromDom();
+  if (!state.competitorAsin) {
+    state.error = "Paste an Amazon ASIN or product URL for the item you are making.";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.error = null;
+  render();
+  try {
+    const q = encodeURIComponent(state.competitorAsin);
+    state.competitor = await api(`/api/amazon-product?asin=${q}${force ? "&force=1" : ""}`);
+    if (state.competitor?.priceUsd) {
+      state.inputs.competitorPriceUsd = state.competitor.priceUsd;
+    }
+  } catch (err) {
+    state.error = err.message;
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 async function price() {
-  // Re-read DOM fields so Generate works even if an input never blurred.
-  for (const [key] of fields) {
-    const el = document.getElementById(key);
-    if (el && el.value !== "") state.inputs[key] = Number(el.value);
+  readFieldsFromDom();
+  // If an ASIN is present but product price is still 0, fetch it first.
+  if ((!state.inputs.competitorPriceUsd || state.inputs.competitorPriceUsd <= 0) && state.competitorAsin) {
+    await refreshCompetitor(false);
+    readFieldsFromDom();
   }
   state.busy = true;
   state.error = null;
@@ -119,7 +159,9 @@ async function copyHubspot() {
 function render() {
   const root = document.getElementById("app");
   const market = state.market;
+  const competitor = state.competitor;
   const result = state.result;
+  const c = result?.competitive;
   const recommended = result?.recommended;
 
   root.innerHTML = `
@@ -127,49 +169,70 @@ function render() {
       <div class="brand">
         <div class="brand-kicker">Print Operations · Tool</div>
         <h1>Pricing Matrix</h1>
-        <p>Turn resin mass, machine time, and live bottle cost into a quote that clears your target margin — with market bands for a sanity check.</p>
+        <p>Slicer grams × bottle cost vs Amazon listing for the part you make — undercut the listing and keep the highest profit above your floor.</p>
       </div>
-      <div class="live-pill" title="${market?.warning || "Resin market feed"}">
+      <div class="live-pill">
         <span class="dot ${market?.warning ? "warn" : ""}"></span>
-        <span>Resin ${market ? `<strong>${money(market.bottlePriceUsd)}</strong> / ${market.bottleMassG}g` : "loading…"}</span>
-        <span>· ${market?.source || "—"}</span>
+        <span>Resin <strong>${market ? money(market.bottlePriceUsd) : "…"}</strong> / ${market?.bottleMassG || 1000}g</span>
       </div>
     </header>
 
     <div class="layout">
       <section class="panel">
-        <h2>Job inputs</h2>
+        <h2>1 · Real costs</h2>
         <div class="grid" id="fields"></div>
+
+        <h2 style="margin-top:1.1rem">2 · Amazon product you compete with</h2>
+        <div class="field full">
+          <label for="competitorAsin">Amazon ASIN or product URL</label>
+          <input id="competitorAsin" type="text" placeholder="B0XXXXXXXX or https://www.amazon.com/dp/..." value="${state.competitorAsin.replaceAll('"', "&quot;")}" />
+        </div>
+        ${
+          competitor
+            ? `<p class="note">${competitor.title ? `<strong>${competitor.title}</strong><br>` : ""}Listing ${competitor.priceUsd != null ? money(competitor.priceUsd) : "—"} · ${competitor.source}${competitor.warning ? ` · ${competitor.warning}` : ""}</p>`
+            : `<p class="note">Fetch the live buy-box price for the finished item, then generate the undercut quote.</p>`
+        }
+
         <div class="actions">
-          <button class="btn-primary" id="btn-price" ${state.busy ? "disabled" : ""}>${state.busy ? "Working…" : "Generate quote"}</button>
-          <button class="btn-ghost" id="btn-refresh" ${state.busy ? "disabled" : ""}>Refresh Amazon resin</button>
+          <button class="btn-primary" id="btn-price" ${state.busy ? "disabled" : ""}>${state.busy ? "Working…" : "Generate best price"}</button>
+          <button class="btn-ghost" id="btn-comp" ${state.busy ? "disabled" : ""}>Fetch Amazon product</button>
+          <button class="btn-ghost" id="btn-resin" ${state.busy ? "disabled" : ""}>Refresh resin bottle</button>
         </div>
         ${market?.warning ? `<div class="warning">${market.warning}</div>` : ""}
+        ${competitor?.warning ? `<div class="warning">${competitor.warning}</div>` : ""}
         ${state.error ? `<div class="warning">${state.error}</div>` : ""}
-        <p class="note">Defaults match Print Operations: 40% target margin, labor + machine rolled into <code>print_labor_cost</code> for HubSpot.</p>
       </section>
 
       <section class="panel">
-        <h2>Best quote</h2>
+        <h2>Best price</h2>
         ${
-          recommended
+          recommended && c
             ? `
           <div class="hero-quote">
-            <div class="label">Recommended · ${recommended.label}</div>
-            <div class="amount">${money(recommended.amountUsd)}</div>
-            <div class="meta">${recommended.marginPercent}% margin · ${money(recommended.grossProfitUsd)} gross · cost ${money(result.costs.costTotalUsd)}</div>
+            <div class="label">${c.viable ? "Recommended undercut" : "Blocked — use floor"}</div>
+            <div class="amount">${money(c.recommendedUsd)}</div>
+            <div class="meta">${c.marginPercent}% margin · ${money(c.grossProfitUsd)} profit · cost ${money(c.costFloorUsd)}</div>
           </div>
+          <p class="note">${c.message}</p>
           <div class="tiers">
             ${result.tiers
               .map(
                 (t) => `
-              <div class="tier ${t.id === recommended.id ? "active" : ""}">
+              <div class="tier ${Math.abs(t.amountUsd - c.recommendedUsd) < 0.009 ? "active" : ""}">
                 <div class="name">${t.label}</div>
                 <div class="val">${money(t.amountUsd)}</div>
                 <div class="side">${t.marginPercent}% · ${money(t.grossProfitUsd)}</div>
               </div>`,
               )
               .join("")}
+          </div>
+          <h2>Compare</h2>
+          <div class="costs">
+            <div class="row"><span>Amazon listing</span><span>${c.amazonListingUsd != null ? money(c.amazonListingUsd) : "—"}</span></div>
+            <div class="row"><span>Your undercut</span><span>${c.undercutPriceUsd != null ? money(c.undercutPriceUsd) : "—"}</span></div>
+            <div class="row"><span>Savings vs Amazon</span><span>${c.savingsVsAmazonUsd != null ? `${money(c.savingsVsAmazonUsd)} (${c.savingsVsAmazonPercent}%)` : "—"}</span></div>
+            <div class="row"><span>Min viable (floor)</span><span>${money(c.minViableUsd)}</span></div>
+            <div class="row total"><span>Material from slicer</span><span>${money(result.costs.materialUsd)} · ${state.inputs.resinMassG}g</span></div>
           </div>
           <h2>Cost stack</h2>
           <div class="costs">
@@ -180,16 +243,6 @@ function render() {
             <div class="row"><span>Packaging</span><span>${money(result.costs.packagingUsd)}</span></div>
             <div class="row"><span>Shipping</span><span>${money(result.costs.shippingUsd)}</span></div>
             <div class="row total"><span>Total cost</span><span>${money(result.costs.costTotalUsd)}</span></div>
-          </div>
-          <h2>Market bands</h2>
-          <div class="market">
-            ${result.marketBands
-              .map(
-                (b) => `
-              <div class="row"><span>${b.label}</span><span>${money(b.lowUsd)} – ${money(b.highUsd)}</span></div>
-              <div class="note" style="margin:0 0 0.4rem">${b.basis}</div>`,
-              )
-              .join("")}
           </div>
           <h2>HubSpot field map</h2>
           <div class="hubspot">
@@ -204,7 +257,7 @@ function render() {
             ${state.copied ? `<span class="copy-ok">copied</span>` : ""}
           </div>
         `
-            : `<p class="note">Enter the job and generate a quote to see floor / target / stretch pricing against live resin cost.</p>`
+            : `<p class="note">Enter slicer grams, refresh bottle cost, fetch the Amazon product listing, then generate.</p>`
         }
       </section>
     </div>
@@ -223,17 +276,18 @@ function render() {
     input.addEventListener("input", () => {
       state.inputs[key] = Number(input.value);
     });
-    input.addEventListener("change", () => {
-      state.inputs[key] = Number(input.value);
-    });
     wrap.appendChild(input);
     fieldsEl.appendChild(wrap);
   }
 
   document.getElementById("btn-price")?.addEventListener("click", () => price());
-  document.getElementById("btn-refresh")?.addEventListener("click", () => refreshMarket(true));
+  document.getElementById("btn-comp")?.addEventListener("click", () => refreshCompetitor(true));
+  document.getElementById("btn-resin")?.addEventListener("click", () => refreshResin(true));
   document.getElementById("btn-copy")?.addEventListener("click", () => copyHubspot());
+  document.getElementById("competitorAsin")?.addEventListener("input", (e) => {
+    state.competitorAsin = e.target.value.trim();
+  });
 }
 
 render();
-refreshMarket(false).then(() => price());
+refreshResin(false).then(() => price());
