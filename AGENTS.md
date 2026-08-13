@@ -2,22 +2,24 @@
 
 ## Cursor Cloud specific instructions
 
-This repository is a placeholder with no application code, package manifests, or services. Tracked content is the `terst` file plus Cloud Agent config under `.cursor/`.
+### Product
 
-### Environment config (repo-hosted)
-
-Cloud Agent bootstrap is defined in `.cursor/environment.json` (install is a no-op: `true`). There is no `start` command and no long-running services.
+**Tabletop Pricing Matrix** — resin-print quote generator. Express API + static Vite client.
 
 ### Services
 
-None. There is nothing to start, lint, test, or run as an app.
+| Service | Command | Notes |
+|---|---|---|
+| Pricing app (dev) | `npm run build && npm run dev` | Listens on `PORT` or `4177`. |
+| Tests | `npm test` | Node test runner. |
+| Typecheck | `npm run lint` | `tsc --noEmit`. |
+
+No database. Amazon resin price is best-effort HTML parse with cache/fallback.
 
 ### Dependency refresh
 
-Do not add package installs until real project manifests exist. Keep `install` a successful no-op.
+`npm install` (see `.cursor/environment.json`).
 
-### Smoke checks
+### Print Operations
 
-- Confirm checkout: `ls -la` and `cat terst` (contents should be `test`).
-- Confirm git: `git status` on the working branch.
-- Confirm env file: `cat .cursor/environment.json`.
+This tool is linked from HubSpotHost Print Operations **Tools** nav. Deploy URL goes in `PRICING_MATRIX_URL` on that service.
