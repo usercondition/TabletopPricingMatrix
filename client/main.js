@@ -73,6 +73,11 @@ async function refreshMarket(force = false) {
 }
 
 async function price() {
+  // Re-read DOM fields so Generate works even if an input never blurred.
+  for (const [key] of fields) {
+    const el = document.getElementById(key);
+    if (el && el.value !== "") state.inputs[key] = Number(el.value);
+  }
   state.busy = true;
   state.error = null;
   state.copied = false;
@@ -215,6 +220,9 @@ function render() {
     input.type = "number";
     input.step = "any";
     input.value = state.inputs[key] ?? "";
+    input.addEventListener("input", () => {
+      state.inputs[key] = Number(input.value);
+    });
     input.addEventListener("change", () => {
       state.inputs[key] = Number(input.value);
     });
