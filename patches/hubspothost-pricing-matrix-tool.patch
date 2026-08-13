@@ -1,0 +1,162 @@
+From 41faa3d817292b224b382a77036f3f4fbc376914 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Thu, 13 Aug 2026 22:03:21 +0000
+Subject: [PATCH 1/2] Add Pricing Matrix tool link under Print Operations Tools
+
+Expose PRICING_MATRIX_URL via /api/health and show a Price sidebar tool that
+opens the Tabletop Pricing Matrix quote generator.
+---
+ README.md                       |  8 +++++++
+ client/src/components/shell.tsx | 38 +++++++++++++++++++++++++++++++++
+ server/routes.ts                |  1 +
+ shared/schema.ts                |  2 ++
+ 4 files changed, 49 insertions(+)
+
+diff --git a/README.md b/README.md
+index 3a0975f..71a87b1 100644
+--- a/README.md
++++ b/README.md
+@@ -70,6 +70,14 @@ Order links live in a SQLite file (`data.db` in the project root, overridable wi
+ 
+ The repository includes `railway.toml` so Railway can build the app with `npm ci && npm run build`, start it with `npm run start`, and use `/api/health` as the deployment health check.
+ 
++Optional Print Operations **Tools** link — Pricing Matrix:
++
++```text
++PRICING_MATRIX_URL=https://<tabletop-pricing-matrix>.up.railway.app
++```
++
++When set, a **Price** tool appears in the sidebar Tools section and opens the quote generator.
++
+ For the initial single-service setup:
+ 
+ 1. Connect the GitHub repository to a Railway service and deploy the `main` branch.
+diff --git a/client/src/components/shell.tsx b/client/src/components/shell.tsx
+index 4c39dd8..d78d66c 100644
+--- a/client/src/components/shell.tsx
++++ b/client/src/components/shell.tsx
+@@ -6,6 +6,7 @@ import {
+   BarChart3,
+   Beaker,
+   Boxes,
++  Calculator,
+   ClipboardCheck,
+   ExternalLink,
+   Home,
+@@ -19,9 +20,11 @@ import {
+   ShipWheel,
+   Sun,
+ } from "lucide-react";
++import { useQuery } from "@tanstack/react-query";
+ import { AttentionBell } from "@/components/attention-bell";
+ import { useOwnerSession } from "@/hooks/use-owner-session";
+ import { cn } from "@/lib/utils";
++import type { HealthResponse } from "@shared/schema";
+ 
+ /* ---------------------------------------------------------------- theme --- */
+ 
+@@ -218,6 +221,7 @@ export function AppShell({ children }: { children: ReactNode }) {
+             <ShipWheel className="h-3.5 w-3.5" />
+             <span className="text-xs font-medium">Ship</span>
+           </a>
++          <PricingMatrixToolLink />
+           <ThemeToolButton />
+           {isUnlocked ? (
+             <button
+@@ -239,6 +243,40 @@ export function AppShell({ children }: { children: ReactNode }) {
+   );
+ }
+ 
++function PricingMatrixToolLink() {
++  const health = useQuery<HealthResponse>({
++    queryKey: ["/api/health"],
++    staleTime: 60_000,
++  });
++  const fromEnv = (import.meta.env.VITE_PRICING_MATRIX_URL as string | undefined)?.trim();
++  const href = health.data?.pricingMatrixUrl?.trim() || fromEnv || "";
++  if (!href) {
++    return (
++      <span
++        title="Set PRICING_MATRIX_URL on this service to enable the Pricing Matrix tool"
++        data-testid="link-sidebar-pricing-matrix-disabled"
++        className="flex flex-col items-center gap-1 rounded-md px-2 py-2 text-muted-foreground/50"
++      >
++        <Calculator className="h-3.5 w-3.5" />
++        <span className="text-xs font-medium">Price</span>
++      </span>
++    );
++  }
++  return (
++    <a
++      href={href}
++      target="_blank"
++      rel="noopener noreferrer"
++      title="Pricing Matrix — quote generator"
++      data-testid="link-sidebar-pricing-matrix"
++      className="flex flex-col items-center gap-1 rounded-md px-2 py-2 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
++    >
++      <Calculator className="h-3.5 w-3.5" />
++      <span className="text-xs font-medium">Price</span>
++    </a>
++  );
++}
++
+ function ThemeToolButton() {
+   const { theme, toggle } = useContext(ThemeContext);
+   return (
+diff --git a/server/routes.ts b/server/routes.ts
+index 59ba05a..11a8b93 100644
+--- a/server/routes.ts
++++ b/server/routes.ts
+@@ -697,6 +697,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
+       readiness: decision.write
+         ? "Live writes enabled. Recalculations PATCH HubSpot deals."
+         : `Dry run only. No HubSpot writes (${decision.reason}).`,
++      pricingMatrixUrl: process.env.PRICING_MATRIX_URL?.trim() || null,
+       safety: {
+         dryRun: config.dryRun,
+         allowHubspotWrites: config.allowWrites,
+diff --git a/shared/schema.ts b/shared/schema.ts
+index c801566..3093165 100644
+--- a/shared/schema.ts
++++ b/shared/schema.ts
+@@ -67,6 +67,8 @@ export interface HealthResponse {
+   status: "ok";
+   mode: "dry-run" | "live-write";
+   readiness: string;
++  /** Public URL for the Tabletop Pricing Matrix tool (Tools nav). */
++  pricingMatrixUrl?: string | null;
+   safety: {
+     dryRun: boolean;
+     allowHubspotWrites: boolean;
+-- 
+2.43.0
+
+
+From 6d3eb415c0c809338af1792290f712139784b206 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Thu, 13 Aug 2026 22:04:35 +0000
+Subject: [PATCH 2/2] Document PRICING_MATRIX_URL in .env.example
+
+---
+ .env.example | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/.env.example b/.env.example
+index 194baa7..ed2dc26 100644
+--- a/.env.example
++++ b/.env.example
+@@ -79,6 +79,10 @@ PRINT_FILE_MAX_MB=2048
+ # node -e "console.log(require('crypto').createHash('sha256').update('YOUR-CODE').digest('hex'))"
+ PAID_ORDER_INTAKE_ACCESS_CODE_HASH=
+ 
++# Public URL for the Tabletop Pricing Matrix quote tool (Tools → Price).
++# PRICING_MATRIX_URL=https://your-pricing-matrix.up.railway.app
++
++
+ # --- Tracker assistant (optional) -------------------------------------------
+ # Read-only owner helper on the Command center. Works without a model key using
+ # deterministic rules over Performance + intake data. If you set an OpenAI
+-- 
+2.43.0
+
