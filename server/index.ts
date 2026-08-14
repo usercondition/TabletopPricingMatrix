@@ -175,13 +175,7 @@ app.post("/api/price", (req, res) => {
       competitorPriceUsd: num(body.competitorPriceUsd, DEFAULT_INPUTS.competitorPriceUsd),
       undercutPercent: num(body.undercutPercent, DEFAULT_INPUTS.undercutPercent),
       undercutExtraUsd: num(body.undercutExtraUsd, DEFAULT_INPUTS.undercutExtraUsd),
-      laborMinutes: num(body.laborMinutes, DEFAULT_INPUTS.laborMinutes),
-      laborRatePerHour: num(body.laborRatePerHour, DEFAULT_INPUTS.laborRatePerHour),
-      printHours: num(body.printHours, DEFAULT_INPUTS.printHours),
-      machineRatePerHour: num(body.machineRatePerHour, DEFAULT_INPUTS.machineRatePerHour),
-      packagingUsd: num(body.packagingUsd, DEFAULT_INPUTS.packagingUsd),
       shippingUsd: num(body.shippingUsd, DEFAULT_INPUTS.shippingUsd),
-      failureRate: num(body.failureRate, DEFAULT_INPUTS.failureRate),
       minMargin: num(body.minMargin, DEFAULT_INPUTS.minMargin),
       targetMargin: num(body.targetMargin, DEFAULT_INPUTS.targetMargin),
     };

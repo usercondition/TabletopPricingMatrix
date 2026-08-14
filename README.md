@@ -4,11 +4,12 @@ Quote generator for resin print jobs that **undercuts Warhammer RRP / Amazon** w
 
 ## How it prices
 
-1. **Slicer grams** × **live bottle cost** (Amazon resin ASIN) → material  
-2. Add labor, machine, failure buffer, pack, ship → **cost floor** (supports **quantity**)  
-3. Pick a **Warhammer kit** from the local SQLite catalog (or fetch an Amazon listing) as the competitor price  
-4. Recommend the **highest price that still undercuts** that RRP (default 5%), unless that drops below your min-margin floor  
+1. **Slicer grams** × **live bottle cost** (Amazon resin ASIN) → **resin cost floor** (supports **quantity**)  
+2. Pick a **Warhammer kit** from the local SQLite catalog (or fetch an Amazon listing) as the competitor RRP  
+3. Recommend the **highest product price that still undercuts** that RRP (default 5%), unless that drops below your min-margin floor  
+4. **Add shipping on top** of that product price for the customer total  
 
+No labor / machine / packaging / hours in the quote — only resin + shipping add-on.  
 Generate never blocks on Amazon — type listing `$` manually anytime.
 
 ## Warhammer price catalog

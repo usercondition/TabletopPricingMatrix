@@ -7,10 +7,11 @@
 **Tabletop Pricing Matrix** — competitive resin-print quote tool for Print Operations.
 
 Flow:
-1. Slicer resin grams × live Amazon bottle cost → material
-2. Cost stack → min-margin floor
-3. Warhammer catalog RRP (SQLite) and/or Amazon listing → undercut while maximizing profit
-4. Map to HubSpot fields
+1. Slicer resin grams × live Amazon bottle cost → **product cost** (resin only)
+2. Min-margin floor on resin cost
+3. Warhammer catalog RRP (SQLite) and/or Amazon listing → undercut product price
+4. **Shipping is added on top** of the final product price (pass-through; not in margin math)
+5. Map to HubSpot fields (`print_labor_cost` / `print_packaging_cost` are 0)
 
 ### Warhammer catalog
 

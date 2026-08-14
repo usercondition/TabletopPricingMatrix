@@ -1,4 +1,4 @@
-const STORAGE_KEY = "tpm-pricing-v2";
+const STORAGE_KEY = "tpm-pricing-v3";
 const API_TIMEOUT_MS = 12_000;
 
 const money = (n) =>
@@ -17,13 +17,7 @@ const defaultInputs = () => ({
   competitorPriceUsd: 0,
   undercutPercent: 0.05,
   undercutExtraUsd: 0,
-  laborMinutes: 45,
-  laborRatePerHour: 35,
-  printHours: 6,
-  machineRatePerHour: 2.5,
-  packagingUsd: 4,
   shippingUsd: 8,
-  failureRate: 0.08,
   minMargin: 0.25,
   targetMargin: 0.4,
 });
@@ -43,15 +37,9 @@ const state = {
 const fields = [
   ["resinMassG", "Slicer resin (g)"],
   ["quantity", "Quantity (units)"],
-  ["printHours", "Print hours / unit"],
-  ["laborMinutes", "Labor min / unit"],
-  ["laborRatePerHour", "Labor $/hr"],
-  ["machineRatePerHour", "Machine $/hr"],
-  ["packagingUsd", "Packaging $/unit"],
-  ["shippingUsd", "Shipping $/order"],
-  ["failureRate", "Failure buffer (0–1)"],
   ["bottlePriceUsd", "Bottle price $"],
   ["bottleMassG", "Bottle mass g"],
+  ["shippingUsd", "Shipping $/order (added on top)"],
   ["undercutPercent", "Undercut % (0–1)"],
   ["undercutExtraUsd", "Extra undercut $"],
   ["minMargin", "Min margin (0–1)"],
@@ -171,18 +159,19 @@ function paintResults() {
     return;
   }
 
+  const product = c.recommendedProductUsd ?? c.recommendedUsd;
   host.innerHTML = `
     <div class="hero-quote">
-      <div class="label">${c.viable ? "Recommended undercut" : "Blocked — use floor"}</div>
+      <div class="label">${c.viable ? "Customer total (product + ship)" : "Blocked — floor + ship"}</div>
       <div class="amount">${money(c.recommendedUsd)}</div>
-      <div class="meta">${c.marginPercent}% margin · ${money(c.grossProfitUsd)} profit · ${money(c.recommendedPerUnitUsd)}/unit · cost ${money(c.costFloorUsd)}</div>
+      <div class="meta">${money(product)} product · + ${money(c.shippingUsd)} ship · ${c.marginPercent}% margin on product · ${money(c.grossProfitUsd)} profit · resin cost ${money(c.costFloorUsd)}</div>
     </div>
     <p class="note">${c.message}</p>
     <div class="tiers">
       ${result.tiers
         .map(
           (t) => `
-        <div class="tier ${Math.abs(t.amountUsd - c.recommendedUsd) < 0.009 ? "active" : ""}">
+        <div class="tier ${Math.abs(t.amountUsd - product) < 0.009 ? "active" : ""}">
           <div class="name">${t.label}</div>
           <div class="val">${money(t.amountUsd)}</div>
           <div class="side">${t.marginPercent}% · ${money(t.grossProfitUsd)}</div>
@@ -190,34 +179,29 @@ function paintResults() {
         )
         .join("")}
     </div>
-    <h2>Compare</h2>
+    <h2>Compare (product, before shipping)</h2>
     <div class="costs">
-      <div class="row"><span>Amazon listing (order)</span><span>${c.amazonListingUsd != null ? money(c.amazonListingUsd) : "—"}</span></div>
-      <div class="row"><span>Your undercut (order)</span><span>${c.undercutPriceUsd != null ? money(c.undercutPriceUsd) : "—"}</span></div>
-      <div class="row"><span>Savings vs Amazon</span><span>${c.savingsVsAmazonUsd != null ? `${money(c.savingsVsAmazonUsd)} (${c.savingsVsAmazonPercent}%)` : "—"}</span></div>
-      <div class="row"><span>Min viable floor</span><span>${money(c.minViableUsd)}</span></div>
-      <div class="row total"><span>Material · ${state.inputs.resinMassG}g × ${result.costs.quantity}</span><span>${money(result.costs.materialUsd)}</span></div>
+      <div class="row"><span>Competitor RRP (order)</span><span>${c.amazonListingUsd != null ? money(c.amazonListingUsd) : "—"}</span></div>
+      <div class="row"><span>Your undercut (product)</span><span>${c.undercutPriceUsd != null ? money(c.undercutPriceUsd) : "—"}</span></div>
+      <div class="row"><span>Savings vs competitor</span><span>${c.savingsVsAmazonUsd != null ? `${money(c.savingsVsAmazonUsd)} (${c.savingsVsAmazonPercent}%)` : "—"}</span></div>
+      <div class="row"><span>Min viable product floor</span><span>${money(c.minViableUsd)}</span></div>
+      <div class="row"><span>+ Shipping (order)</span><span>${money(c.shippingUsd)}</span></div>
+      <div class="row total"><span>Customer total</span><span>${money(c.recommendedUsd)}</span></div>
     </div>
     ${
       insights
         ? `<h2>Insights</h2>
       <div class="costs">
-        <div class="row"><span>Profit / print-hour</span><span>${insights.profitPerPrintHour != null ? money(insights.profitPerPrintHour) : "—"}</span></div>
-        <div class="row"><span>Resin share of cost</span><span>${insights.resinSharePercent}%</span></div>
         <div class="row"><span>Max undercut still viable</span><span>${insights.maxViableUndercutPercent != null ? `${insights.maxViableUndercutPercent}%` : "—"}</span></div>
-        <div class="row"><span>Amazon clears floor?</span><span>${insights.amazonBeatsFloor == null ? "—" : insights.amazonBeatsFloor ? "yes" : "no"}</span></div>
+        <div class="row"><span>Competitor clears floor?</span><span>${insights.amazonBeatsFloor == null ? "—" : insights.amazonBeatsFloor ? "yes" : "no"}</span></div>
       </div>`
         : ""
     }
     <h2>Cost stack</h2>
     <div class="costs">
-      <div class="row"><span>Material</span><span>${money(result.costs.materialUsd)}</span></div>
-      <div class="row"><span>Labor</span><span>${money(result.costs.laborUsd)}</span></div>
-      <div class="row"><span>Machine</span><span>${money(result.costs.machineUsd)}</span></div>
-      <div class="row"><span>Failure buffer</span><span>${money(result.costs.failureBufferUsd)}</span></div>
-      <div class="row"><span>Packaging</span><span>${money(result.costs.packagingUsd)}</span></div>
-      <div class="row"><span>Shipping</span><span>${money(result.costs.shippingUsd)}</span></div>
-      <div class="row total"><span>Total · ${money(result.costs.costPerUnitUsd)}/unit</span><span>${money(result.costs.costTotalUsd)}</span></div>
+      <div class="row"><span>Resin material · ${state.inputs.resinMassG}g × ${result.costs.quantity}</span><span>${money(result.costs.materialUsd)}</span></div>
+      <div class="row"><span>Shipping (added to final)</span><span>${money(result.costs.shippingUsd)}</span></div>
+      <div class="row total"><span>Product cost (margin base)</span><span>${money(result.costs.costTotalUsd)}</span></div>
     </div>
     <h2>HubSpot field map</h2>
     <div class="hubspot">
@@ -341,7 +325,7 @@ function renderShell() {
       <div class="brand">
         <div class="brand-kicker">Print Operations · Tool</div>
         <h1>Pricing Matrix</h1>
-        <p>Slicer grams × bottle cost vs Amazon listing — undercut for max profit above your floor. Amazon never blocks Generate.</p>
+        <p>Slicer grams × bottle cost vs Warhammer/Amazon RRP — undercut the product, then add shipping on top. Amazon never blocks Generate.</p>
       </div>
       <div class="live-pill" id="resin-pill"></div>
     </header>
